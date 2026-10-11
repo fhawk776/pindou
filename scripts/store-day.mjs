@@ -239,6 +239,13 @@ const twoOnTwo = await api('POST', '/api/v1/sessions', {
 check('双人套餐可以占 2 个台', twoOnTwo.ok, 'true');
 await api('POST', `/api/v1/sessions/${twoOnTwo.data.sessionId}/settle`, { paymentMethod: 'cash' });
 
+// 双人是「小于等于 2」：只占 1 个台也要允许（一个人买双人套餐、或两人挤一桌）
+const twoOnOne = await api('POST', '/api/v1/sessions', {
+  tableId: idleIds[5], memberId: m4b.id, productId: P.T1H_D.id,
+});
+check('双人套餐也可以只占 1 个台', twoOnOne.ok, 'true');
+await api('POST', `/api/v1/sessions/${twoOnOne.data.sessionId}/settle`, { paymentMethod: 'cash' });
+
 const twoOnThree = await api('POST', '/api/v1/sessions', {
   tableId: idleIds[5], extraTableIds: [idleIds[6], idleIds[7]], memberId: m4b.id, productId: P.T1H_D.id,
 });
