@@ -1151,8 +1151,19 @@ export async function getTableBoard(): Promise<{
                  JOIN tables t2 ON t2.id = st2.table_id
                 WHERE st2.session_id = ts.id) AS group_table_names
          FROM tables t
-         LEFT JOIN session_tables st ON st.table_id = t.id
-         LEFT JOIN table_sessions ts ON ts.id = st.session_id AND ts.status = 'active'
+         -- 【必须只关联「活跃」的会话】
+         --   session_tables 是只增不删的：会话结束后记录仍在，
+         --   用于追溯"这一台当时属于哪个会话"。
+         --   若直接 LEFT JOIN 全表，一个台有几条历史就会多出几行，
+         --   其中只有一行能接上活跃会话，其余行 ts 为 NULL、被当成空闲桌，
+         --   于是看板上出现重复的幽灵桌位（曾出现 8 张桌渲染成 11 个卡片）。
+         --   这里用子查询先把范围收敛到 active，保证每个台最多一行。
+         LEFT JOIN (
+           SELECT s.*, st.table_id AS occupied_table_id
+             FROM session_tables st
+             JOIN table_sessions s ON s.id = st.session_id
+            WHERE s.status = 'active'
+         ) ts ON ts.occupied_table_id = t.id
          LEFT JOIN members m ON m.id = ts.member_id
          LEFT JOIN products p ON p.id = ts.product_id
         WHERE t.is_active = true

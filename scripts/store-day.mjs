@@ -202,6 +202,16 @@ const grp = board.tables.filter((t) => t.session && t.session.sessionId === r7.d
 check('看板两个台显示同一会话', grp.length, 2);
 check('两台都标出同组', grp[0].session.groupTableNames, grp[1].session.groupTableNames);
 
+// 【回归】看板桌位数必须严格等于桌位表的行数。
+// session_tables 是只增不删的（保留历史），若查询时直接 JOIN 全表，
+// 一个台有几条历史就多渲染几行"幽灵空闲桌" —— 曾把 8 张桌渲染成 11 个卡片。
+check('看板桌位数 = 桌位表行数', board.tables.length,
+  sql(`select count(1) from tables where is_active`));
+check('没有重复的桌号',
+  sql(`select count(1) from (select name from tables group by name having count(*) > 1) x`), 0);
+const names = board.tables.map((t) => t.tableName);
+check('看板桌号无重复', new Set(names).size, names.length);
+
 // 别的顾客不能抢其中任一台
 const clash = await api('POST', '/api/v1/sessions', {
   tableId: idleIds[6], guestName: '插队', productId: P.T1H_S.id,
