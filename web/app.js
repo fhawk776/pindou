@@ -409,8 +409,18 @@ async function OpenTablePage() {
   const board = await api.get('/api/v1/board');
   const idleTables = board.tables.filter((t) => t.status === 'idle' && t.tableId !== tableId);
 
+  // 【重新渲染时必须保留已经选好的附加台】
+  //   openWithProduct 弹确认框前会调用 render()，而 render 会重新执行本函数。
+  //   早前这里无条件写成 extraTableIds: []，于是"点套餐"这一步就把
+  //   店员刚加的第二张台清掉了 —— 界面还显示着 08号桌，开台却只开了 06号桌。
+  //   现在只在「同一张主台」时沿用已选值。
+  const prevTarget = state.openTarget;
+  const keepExtras = (prevTarget && prevTarget.tableId === tableId)
+    ? (prevTarget.extraTableIds ?? [])
+    : [];
+
   // 把本次开台的对象存进状态，避免把用户输入的称呼拼进 onclick（会破坏 JS 语法）
-  state.openTarget = { tableId, memberId, guestName, extraTableIds: [], idleTables };
+  state.openTarget = { tableId, memberId, guestName, extraTableIds: keepExtras, idleTables };
 
   const who = member ? member.displayName : guestName;
 
