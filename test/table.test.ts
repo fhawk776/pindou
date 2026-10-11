@@ -15,7 +15,7 @@ import { openTable, settleSession, changeSessionProduct, getTableBoard } from '.
 import { addDaysStr } from '../src/lib/dates.js';
 import { createMember, purchaseCard } from '../src/services/members.js';
 import { listLedger, getRevenueSummary, reconcile, voidOrder } from '../src/services/revenue.js';
-import { calcOvertimeFee, isDiscountDay } from '../src/services/tables.js';
+import { overtimeMinutesOf, isDiscountDay } from '../src/services/tables.js';
 
 let dbAvailable = false;
 let userId: number;
@@ -127,54 +127,30 @@ describe('工位与计费（集成测试）', () => {
   }
 
   // =========================================================================
-  // 纯函数：超时与打折日
+  // 纯函数：超时分钟数与打折日
+  //
+  // 【重要】超时费已不再由系统计算 —— 店家线下自行决定。
+  //   系统只算出「超了多少分钟」供界面提示，需要加收时店员手动填实收。
+  //   因此这里只验证分钟数，不再验证任何金额。
   // =========================================================================
-  describe('超时阶梯计费', () => {
-    const fee = (actual, prod) => calcOvertimeFee({ actualMinutes: actual, productMinutes: prod, cfg: PRICING });
+  describe('超时只计时不计费', () => {
+    const overMin = (actual, prod) => overtimeMinutesOf(actual, prod);
 
-    test('未超时不收费', () => {
-      assert.equal(fee(60, 60).feeCents, 0);
-      assert.equal(fee(59, 60).feeCents, 0);
+    test('未超时 → 0 分钟', () => {
+      assert.equal(overMin(60, 60), 0);
+      assert.equal(overMin(59, 60), 0);
     });
 
-    test('超时 1–20 分钟只收打底 ¥5', () => {
-      assert.equal(fee(61, 60).feeCents, 500, '超 1 分钟');
-      assert.equal(fee(70, 60).feeCents, 500, '超 10 分钟');
-      assert.equal(fee(75, 60).feeCents, 500, '超 15 分钟');
-      assert.equal(fee(80, 60).feeCents, 500, '超 20 分钟（边界）');
+    test('超时分钟数 = 实际 - 套餐时长', () => {
+      assert.equal(overMin(61, 60), 1);
+      assert.equal(overMin(80, 60), 20);
+      assert.equal(overMin(90, 60), 30);
+      assert.equal(overMin(240, 60), 180, '三小时套餐超时');
     });
 
-    test('超出 20 分钟后每满 10 分钟加 ¥1.88', () => {
-      assert.equal(fee(81, 60).feeCents, 688, '超 21 分钟 → 5 + 1.88');
-      assert.equal(fee(90, 60).feeCents, 688, '超 30 分钟 → 5 + 1.88');
-      assert.equal(fee(91, 60).feeCents, 876, '超 31 分钟 → 5 + 2×1.88');
-      assert.equal(fee(100, 60).feeCents, 876, '超 40 分钟 → 5 + 2×1.88');
-      assert.equal(fee(101, 60).feeCents, 1064, '超 41 分钟 → 5 + 3×1.88');
-      assert.equal(fee(120, 60).feeCents, 1252, '超 60 分钟 → 5 + 4×1.88');
-    });
-
-    test('不足一段按一段算（round_up = true）', () => {
-      // 超 21 分钟：超出打底 1 分钟，不足 10 分钟也按一段算
-      assert.equal(fee(81, 60).stepUnits, 1);
-      // 超 30 分钟：正好一整段
-      assert.equal(fee(90, 60).stepUnits, 1);
-      // 超 31 分钟：多出 1 分钟也要算一段
-      assert.equal(fee(91, 60).stepUnits, 2);
-    });
-
-    test('限板套餐不计超时', () => {
-      const r = fee(300, null);
-      assert.equal(r.feeCents, 0);
-      assert.equal(r.overtimeMinutes, 0);
-    });
-
-    test('超过三小时的长时超时', () => {
-      // 套餐 60 分钟，实际 240 分钟 → 超时 180 分钟
-      // 打底 5 + ceil((180-20)/10)=16 段 × 1.88 = 5 + 30.08 = 35.08
-      const r = fee(240, 60);
-      assert.equal(r.overtimeMinutes, 180);
-      assert.equal(r.stepUnits, 16);
-      assert.equal(r.feeCents, 500 + 16 * 188);
+    test('不限时套餐（限板/日卡）永远为 0', () => {
+      assert.equal(overMin(300, null), 0);
+      assert.equal(overMin(300, 0), 0);
     });
   });
 

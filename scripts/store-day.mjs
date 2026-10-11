@@ -116,28 +116,46 @@ check('暂停期间不计费（未超时）', settle2.data.overtimeFeeCents, 0);
 check('加购金额入账', settle2.data.addonAmountCents, 1980);
 
 // ---------------------------------------------------------------- 超时
-section('④ 超时收费（阶梯）');
+section('④ 超时：只计时、不计费');
 const r3 = await api('POST', '/api/v1/sessions', {
   tableId: idleIds[2], guestName: '超时测试', productId: P.T1H_S.id,
 });
-// 模拟开台 90 分钟前 → 超时 30 分钟 → 打底 ¥5 + 1 档 ¥1.88
+// 模拟开台 90 分钟前 → 超时 30 分钟
 sql(`UPDATE table_sessions SET started_at = now() - interval '90 minutes' WHERE id = ${r3.data.sessionId}`);
 const pv3 = (await api('GET', `/api/v1/sessions/${r3.data.sessionId}/preview`)).data.preview;
 check('已进行 90 分钟', pv3.actualMinutes, 90);
-check('超时 30 分钟', pv3.overtimeMinutes, 30);
-check('超时费 ¥6.88（5 + 1.88）', pv3.overtimeFeeCents, 688);
-check('应收 ¥19.68', pv3.totalCents, 1968);
+check('算出超时 30 分钟', pv3.overtimeMinutes, 30);
+check('超时不收费（金额恒为 0）', pv3.overtimeFeeCents, 0);
+check('应收只含套餐 ¥12.80', pv3.totalCents, 1280);
 
-// 模拟 61 分钟 → 只超 1 分钟 → 打底 ¥5
+// 61 分钟 → 只超 1 分钟
 sql(`UPDATE table_sessions SET started_at = now() - interval '61 minutes' WHERE id = ${r3.data.sessionId}`);
 const pv3b = (await api('GET', `/api/v1/sessions/${r3.data.sessionId}/preview`)).data.preview;
-check('超时 1 分钟收打底 ¥5', pv3b.overtimeFeeCents, 500);
+check('超 1 分钟也不收费', pv3b.overtimeFeeCents, 0);
+check('超时分钟数为 1', pv3b.overtimeMinutes, 1);
 
 // 59 分钟 → 不超时
 sql(`UPDATE table_sessions SET started_at = now() - interval '59 minutes' WHERE id = ${r3.data.sessionId}`);
 const pv3c = (await api('GET', `/api/v1/sessions/${r3.data.sessionId}/preview`)).data.preview;
-check('59 分钟不收超时费', pv3c.overtimeFeeCents, 0);
-await api('POST', `/api/v1/sessions/${r3.data.sessionId}/settle`, { paymentMethod: 'cash' });
+check('59 分钟未超时', pv3c.overtimeMinutes, 0);
+
+// 结账：改回超时 1 分钟，验证结账也返回超时分钟数（不加钱）
+sql(`UPDATE table_sessions SET started_at = now() - interval '61 minutes' WHERE id = ${r3.data.sessionId}`);
+const settle3 = await api('POST', `/api/v1/sessions/${r3.data.sessionId}/settle`, { paymentMethod: 'cash' });
+check('结账实收 = 套餐价 ¥12.80', settle3.data.paidCents, 1280);
+check('结账返回超时分钟数供提示', settle3.data.overtimeMinutes, 1);
+check('结账超时费仍为 0', settle3.data.overtimeFeeCents, 0);
+
+// 门店自己加收：手动把实收改成 ¥20（超时多收 ¥7.20）
+const r3b = await api('POST', '/api/v1/sessions', {
+  tableId: idleIds[2], guestName: '超时加收', productId: P.T1H_S.id,
+});
+sql(`UPDATE table_sessions SET started_at = now() - interval '90 minutes' WHERE id = ${r3b.data.sessionId}`);
+const settle3b = await api('POST', `/api/v1/sessions/${r3b.data.sessionId}/settle`, {
+  paymentMethod: 'cash', overrideTotalCents: 2000, overrideReason: '超时 30 分钟加收 7.2 元',
+});
+check('门店自行加收：实收 ¥20', settle3b.data.paidCents, 2000);
+check('多收 ¥7.20 记入人工调整', settle3b.data.manualAdjustCents, -720);
 
 // ---------------------------------------------------------------- 办卡（开台页）
 section('⑤ 办卡并开台（开台页入口）');

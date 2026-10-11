@@ -221,7 +221,7 @@ describe('卡权益会话（全天不限时）', () => {
     assert.equal(settled.totalCents, 0, '用卡 5 小时仍然免费');
   });
 
-  test('对照：限时套餐超过时长仍会正常计超时', async (t) => {
+  test('对照：限时套餐超时只计时、不计费', async (t) => {
     if (!dbAvailable) return t.skip('数据库不可用');
     const m = await mkCardMember();
 
@@ -229,7 +229,7 @@ describe('卡权益会话（全天不限时）', () => {
       tableId, memberId: m, productId: timedProductId, useCard: false, operatorId: userId,
     });
 
-    // 单人1小时套餐，改成 1 小时 40 分前开台 → 超 40 分钟 = 2 档 = 10 元
+    // 单人1小时套餐，改成 1 小时 40 分前开台 → 超 40 分钟
     await getPool().query(
       `UPDATE table_sessions SET started_at = now() - interval '100 minutes' WHERE id = $1`,
       [r.sessionId]
@@ -240,10 +240,12 @@ describe('卡权益会话（全天不限时）', () => {
     });
 
     assert.equal(settled.usedCard, false);
-    // 新阶梯规则：超 40 分钟 = 打底 ¥5 + 超出 20 分钟的部分按 2 段 × ¥1.88
-    assert.equal(settled.overtimeUnits, 2, '超 40 分钟应为 2 段');
-    assert.equal(settled.overtimeFeeCents, 876, '¥5.00 + 2 × ¥1.88 = ¥8.76');
-    assert.ok(settled.totalCents >= 876, '应收应含超时费');
+    // 超时费已改由店家线下自定，系统不再自动计算：
+    // 只算出"超了多少分钟"供界面提示，金额恒为 0。
+    assert.equal(settled.overtimeMinutes, 40, '应算出超时 40 分钟');
+    assert.equal(settled.overtimeUnits, 0, '不再计档');
+    assert.equal(settled.overtimeFeeCents, 0, '不再自动收超时费');
+    assert.equal(settled.totalCents, settled.productAmountCents, '应收只含套餐，不含超时费');
   });
 
   test('用卡开台必须持有效卡', async (t) => {

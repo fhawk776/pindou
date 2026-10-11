@@ -1187,12 +1187,14 @@ async function refreshPreview() {
         ${p.discountCents > 0 ? `<div class="summary-row"><span>🎉 打折日 8 折</span>
           <span class="v" style="color:var(--pink)">-¥${yuan(p.discountCents)}</span></div>` : ''}
         ${p.addonAmountCents > 0 ? `<div class="summary-row"><span>加购</span><span class="v">¥${yuan(p.addonAmountCents)}</span></div>` : ''}
-        ${p.overtimeFeeCents > 0 ? `<div class="summary-row"><span>超时费（${p.overtimeUnits} 档）</span>
-          <span class="v" style="color:var(--coral)">¥${yuan(p.overtimeFeeCents)}</span></div>` : ''}
         <div class="summary-row total"><span>应收</span><span class="v">¥${yuan(p.totalCents)}</span></div>
         <div class="hint" style="font-size:12px;color:var(--text-dim);margin-top:6px">
           已玩 ${humanMinutes(p.actualMinutes)}${p.usedCard ? ' · 卡核销免套餐费' : ''}
         </div>
+        ${p.overtimeMinutes > 0 ? `<div class="alert warn" style="margin-top:8px">
+          ⏰ 已超时 <b>${humanMinutes(p.overtimeMinutes)}</b>。超时费由店里自己定，
+          需要加收的话，结账时把实收金额改高即可。
+        </div>` : ''}
       </div>`;
   } catch (e) {
     box.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
@@ -1380,8 +1382,10 @@ function settleDialogHtml() {
   if (pv.addonOriginalCents > 0) {
     rows.push(`<div class="ov-row"><span>加购</span><span>¥${yuan(pv.addonOriginalCents)}${pv.addonDiscountCents > 0 ? ' → ¥' + yuan(pv.addonAmountCents) : ''}</span></div>`);
   }
-  if (pv.overtimeFeeCents > 0) {
-    rows.push(`<div class="ov-row"><span>超时费</span><span>¥${yuan(pv.overtimeFeeCents)}${pv.overtimeUnits > 0 ? `（${pv.overtimeUnits} 段）` : ''}</span></div>`);
+  // 超时不再自动计费：只把"超了多久"摆出来，收多少由店里自己定，
+  // 需要加收时改下面的实收金额即可。
+  if (pv.overtimeMinutes > 0) {
+    rows.push(`<div class="ov-row"><span>已超时</span><span style="color:var(--coral)">${humanMinutes(pv.overtimeMinutes)}</span></div>`);
   }
   if (pv.discountCents > 0) {
     rows.push(`<div class="ov-row discount"><span>打折日优惠</span><span>-¥${yuan(pv.discountCents)}</span></div>`);
@@ -2333,7 +2337,7 @@ async function OrderDetailPage() {
       </div>
       <div class="summary-row"><span>套餐</span><span class="v">¥${yuan(o.productAmountCents)}</span></div>
       ${o.addonAmountCents > 0 ? `<div class="summary-row"><span>加购</span><span class="v">¥${yuan(o.addonAmountCents)}</span></div>` : ''}
-      ${o.overtimeFeeCents > 0 ? `<div class="summary-row"><span>超时费</span><span class="v">¥${yuan(o.overtimeFeeCents)}</span></div>` : ''}
+      ${o.overtimeUnits > 0 ? `<div class="summary-row"><span>超时</span><span class="v">${o.overtimeUnits} 档（未计费，由店里自定）</span></div>` : ''}
       ${o.discountCents > 0 ? `<div class="summary-row"><span>${o.isDiscountDay ? '🎉 打折日优惠' : '优惠'}</span>
         <span class="v" style="color:var(--pink)">-¥${yuan(o.discountCents)}</span></div>` : ''}
       <div class="summary-row total"><span>实收</span><span class="v">¥${yuan(o.paidCents)}</span></div>
@@ -2561,32 +2565,12 @@ async function SettingsPage() {
     </div>
 
     <div class="card">
-      <h2>超时规则</h2>
-      <div class="field">
-        <label>超时多久以内收打底费</label>
-        <div class="row">
-          <input id="st-otbase-min" inputmode="numeric" value="${pricing.overtime_base_minutes ?? 20}" oninput="previewOvertime()">
-          <input id="st-otbase-fee" inputmode="decimal" value="${((pricing.overtime_base_fee_cents ?? 500) / 100).toFixed(2)}" oninput="previewOvertime()">
-        </div>
-        <div class="hint">分钟数 / 打底金额（元）</div>
+      <h2>超时</h2>
+      <div class="hint" style="font-size:13px;color:var(--text-mid);line-height:1.7">
+        系统<b>只计时、不自动算超时费</b>。<br>
+        到点后会提醒（看板变色），结账时也会告诉你超了多久，
+        <b>收多少由店里自己定</b> —— 需要加收就在结账页面把实收金额改高。
       </div>
-      <div class="field">
-        <label>超出后每满多少分钟加收</label>
-        <div class="row">
-          <input id="st-otstep-min" inputmode="numeric" value="${pricing.overtime_step_minutes ?? 10}" oninput="previewOvertime()">
-          <input id="st-otstep-fee" inputmode="decimal" value="${((pricing.overtime_step_fee_cents ?? 188) / 100).toFixed(2)}" oninput="previewOvertime()">
-        </div>
-        <div class="hint">分钟数 / 每段加收（元）</div>
-      </div>
-      <div class="field">
-        <label>不足一段怎么算</label>
-        <select id="st-otround" onchange="previewOvertime()">
-          <option value="true" ${pricing.overtime_round_up !== false ? 'selected' : ''}>按一段算</option>
-          <option value="false" ${pricing.overtime_round_up === false ? 'selected' : ''}>不计</option>
-        </select>
-      </div>
-      <div id="st-ot-preview"></div>
-      <button class="btn" onclick="saveOvertime()">保存超时规则</button>
     </div>
 
     <div class="card">
@@ -2644,7 +2628,7 @@ async function SettingsPage() {
   </div>`;
 }
 
-/** 保存打折规则与提醒设置（超时规则由 saveOvertime 单独保存） */
+/** 保存打折规则与提醒设置 */
 async function savePricing() {
   const errBox = $('#st-error');
   const days = $('#st-days').value.split(',').map((x) => parseInt(x.trim(), 10)).filter((x) => x >= 1 && x <= 31);
@@ -2672,64 +2656,6 @@ async function savePricing() {
   }
 }
 
-/** 按当前表单值试算超时阶梯，让店主立刻看到效果 */
-function previewOvertime() {
-  const box = $('#st-ot-preview');
-  if (!box) return;
-
-  const baseMin = parseInt($('#st-otbase-min')?.value, 10) || 20;
-  const baseFee = toCents($('#st-otbase-fee')?.value) || 0;
-  const stepMin = parseInt($('#st-otstep-min')?.value, 10) || 10;
-  const stepFee = toCents($('#st-otstep-fee')?.value) || 0;
-  const roundUp = $('#st-otround')?.value !== 'false';
-
-  const samples = [10, baseMin, baseMin + 1, baseMin + stepMin, baseMin + stepMin + 1, baseMin + stepMin * 3];
-  const rows = samples.map((m) => {
-    let fee = 0;
-    fee = baseFee;
-    const beyond = m - baseMin;
-    if (beyond > 0) {
-      const units = roundUp ? Math.ceil(beyond / stepMin) : Math.floor(beyond / stepMin);
-      fee += units * stepFee;
-    }
-    return '<div class="ot-row"><span>超时 ' + m + ' 分钟</span><span>¥' + yuan(fee) + '</span></div>';
-  });
-
-  box.innerHTML = '<div class="ot-preview-box"><div class="ot-title">收费预览</div>' + rows.join('') + '</div>';
-}
-
-/** 保存超时阶梯规则 */
-async function saveOvertime() {
-  const errBox = $('#st-error');
-  const baseMin = parseInt($('#st-otbase-min').value, 10);
-  const baseFee = toCents($('#st-otbase-fee').value);
-  const stepMin = parseInt($('#st-otstep-min').value, 10);
-  const stepFee = toCents($('#st-otstep-fee').value);
-  const roundUp = $('#st-otround').value === 'true';
-
-  if (!Number.isInteger(baseMin) || baseMin <= 0) { errBox.innerHTML = '<div class="alert error">打底分钟数不正确</div>'; return; }
-  if (Number.isNaN(baseFee) || baseFee < 0) { errBox.innerHTML = '<div class="alert error">打底金额不正确</div>'; return; }
-  if (!Number.isInteger(stepMin) || stepMin <= 0) { errBox.innerHTML = '<div class="alert error">阶梯分钟数不正确</div>'; return; }
-  if (Number.isNaN(stepFee) || stepFee < 0) { errBox.innerHTML = '<div class="alert error">阶梯金额不正确</div>'; return; }
-
-  try {
-    const cur = await api.get('/api/v1/settings');
-    await api.put('/api/v1/settings/pricing', {
-      value: {
-        ...cur.settings.pricing,
-        overtime_base_minutes: baseMin,
-        overtime_base_fee_cents: baseFee,
-        overtime_step_minutes: stepMin,
-        overtime_step_fee_cents: stepFee,
-        overtime_round_up: roundUp,
-      },
-    });
-    toast('超时规则已保存');
-    go('settings');
-  } catch (e) {
-    errBox.innerHTML = '<div class="alert error">' + esc(e.message) + '</div>';
-  }
-}
 
 /* =========================================================================
    价目表编辑：新增 / 修改 / 停用 / 删除
@@ -3305,9 +3231,6 @@ function afterRender(name) {
   if (name === 'memberDetail' && state.route.params.tab === 'card') {
     loadCardRecords(state.route.params.id);
   }
-  if (name === 'settings') {
-    previewOvertime();
-  }
 }
 
 /** 用 rAF 驱动秒级更新：标签页切到后台时浏览器会暂停，避免无谓开销 */
@@ -3365,7 +3288,7 @@ Object.assign(window, {
   closeConfirmDialog, runConfirmAction, reallyOpenWithProduct, reallyOpenWithCardProduct,
   openWithCardProduct, reallyChangeProduct, reallyToggleTable, reallyDoSettle,
   pauseTiming, resumeTiming,
-  previewOvertime, saveOvertime, editProduct, closeProductDialog, saveProduct,
+  editProduct, closeProductDialog, saveProduct,
   newProduct, onCategoryChange, deleteProduct, reallyDeleteProduct, toggleProdFlag,
   closeSettleDialog, onOverrideInput,
   pickPayMethod,

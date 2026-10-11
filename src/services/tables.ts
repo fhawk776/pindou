@@ -195,56 +195,21 @@ export async function resolveAddons(
 }
 
 /**
- * 计算超时费用（阶梯式）。
+ * 超时分钟数 = 实际时长 − 套餐时长（负数取 0）。
  *
- * 规则（经店主确认）：
- *   超时 1 – baseMinutes 分钟   → baseFee（打底，超一分钟就收）
- *   之后每满 stepMinutes 分钟   → 加收 stepFee
- *   不足一段：roundUp 为 true 按一段算，否则不计
+ * 【为什么不在这里算钱】
+ *   超时费改由店家线下自行决定，系统不再自动计算（原 calcOvertimeFee 已删除）。
+ *   这里只负责算出"超了多少分钟"，供界面提示店员参考；
+ *   需要加收时，店员在结账弹窗里手动填实收金额。
  *
- * 返回结果为整数分。
- *
- * 换算示例（base=20/¥5，step=10/¥1.88，roundUp=true）：
- *   超时 15 → 500        超时 20 → 500
- *   超时 21 → 688        超时 30 → 688
- *   超时 31 → 876        超时 45 → 1064
+ *   不限时套餐（限板、日卡）或未设时长 → 恒为 0。
  */
-export function calcOvertimeFee(params: {
-  actualMinutes: number;
-  productMinutes: number | null;
-  cfg: PricingConfig;
-}): { overtimeMinutes: number; stepUnits: number; feeCents: number } {
-  const { actualMinutes, productMinutes, cfg } = params;
-
-  // 不限时套餐（限板、日卡）或未设时长 → 无超时
-  if (productMinutes === null || productMinutes <= 0) {
-    return { overtimeMinutes: 0, stepUnits: 0, feeCents: 0 };
-  }
-
-  const overtimeMinutes = actualMinutes - productMinutes;
-  if (overtimeMinutes <= 0) {
-    return { overtimeMinutes: 0, stepUnits: 0, feeCents: 0 };
-  }
-
-  const baseFee = Math.max(0, cfg.overtime_base_fee_cents ?? 500);
-  const baseMinutes = Math.max(1, cfg.overtime_base_minutes ?? 20);
-  const stepMinutes = Math.max(1, cfg.overtime_step_minutes ?? 10);
-  const stepFee = Math.max(0, cfg.overtime_step_fee_cents ?? 188);
-  const roundUp = cfg.overtime_round_up !== false;
-
-  // 未超过打底区间：只收打底费
-  if (overtimeMinutes <= baseMinutes) {
-    return { overtimeMinutes, stepUnits: 0, feeCents: baseFee };
-  }
-
-  const beyond = overtimeMinutes - baseMinutes;
-  const stepUnits = roundUp ? Math.ceil(beyond / stepMinutes) : Math.floor(beyond / stepMinutes);
-
-  return {
-    overtimeMinutes,
-    stepUnits,
-    feeCents: baseFee + stepUnits * stepFee,
-  };
+export function overtimeMinutesOf(
+  actualMinutes: number,
+  productMinutes: number | null
+): number {
+  if (productMinutes === null || productMinutes <= 0) return 0;
+  return Math.max(0, actualMinutes - productMinutes);
 }
 
 /** 生成订单号 */
@@ -779,6 +744,8 @@ export interface SettleResult {
   /** 其中由人工改价产生的减免 */
   manualAdjustCents: Cents;
   actualMinutes: number;
+  /** 超时分钟数。仅供界面提示，不产生费用（超时费改由店家自定） */
+  overtimeMinutes: number;
   overtimeUnits: number;
   isDiscountDay: boolean;
   usedCard: boolean;
@@ -847,22 +814,18 @@ export async function settleSession(input: SettleSessionInput): Promise<SettleRe
       }
     }
 
-    // ---- 超时计算（阶梯式） ----
-    // 用卡核销不计超时（卡是全天不限时的通行权益）
-    // 限板 / 日卡套餐的 overtime_applicable 为 false，同样不计
-    let overtimeUnits = 0;
-    let overtimeFee = 0;
-    let overtimeMinutes = 0;
-    if (product.overtime_applicable && !usedCard) {
-      const ot = calcOvertimeFee({
-        actualMinutes,
-        productMinutes: product.duration_minutes,
-        cfg,
-      });
-      overtimeUnits = ot.stepUnits;
-      overtimeFee = ot.feeCents;
-      overtimeMinutes = ot.overtimeMinutes;
-    }
+    // ---- 超时：只计时，不计费 ----
+    //
+    // 【业务决定】超时费改由店家线下自行决定，系统不再自动计算。
+    //   但仍然算出「超时了多少分钟」，用于界面提示店员
+    //   （需要加收时，店员在结账弹窗里手动填实收金额即可）。
+    //   因此 overtimeUnits / overtimeFee 恒为 0，
+    //   保留这两个变量是为了不动下游的订单写入与返回值结构。
+    const overtimeMinutes = (product.overtime_applicable && !usedCard)
+      ? overtimeMinutesOf(actualMinutes, product.duration_minutes)
+      : 0;
+    const overtimeUnits = 0;
+    const overtimeFee = 0;
 
     // ---- 加购 ----
     const addonItems = (input.addonItems ?? []).filter((x) => x.qty > 0);
@@ -1097,6 +1060,7 @@ export async function settleSession(input: SettleSessionInput): Promise<SettleRe
       discountCents: orderDiscountCents,
       manualAdjustCents: manualAdjustCentsFinal,
       actualMinutes,
+      overtimeMinutes,
       overtimeUnits,
       isDiscountDay: canDiscount,
       usedCard,

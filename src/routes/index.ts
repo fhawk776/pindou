@@ -390,7 +390,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       const s = rows[0];
 
-      const { getPricingConfig, isDiscountDay, calcOvertimeFee, elapsedMinutes, resolveAddons } = await import('../services/tables.js');
+      const { getPricingConfig, isDiscountDay, elapsedMinutes, resolveAddons, overtimeMinutesOf } = await import('../services/tables.js');
       const { applyBp } = await import('../lib/money.js');
       const cfg = await getPricingConfig(client);
 
@@ -405,18 +405,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       const product = prows[0] ?? {};
 
-      // 超时：阶梯式计算，返回档数与金额
-      let overtimeUnits = 0;
-      let overtimeFee = 0;
-      let overtimeMinutes = 0;
-      if (product.overtime_applicable && !usedCard) {
-        const ot = calcOvertimeFee({
-          actualMinutes, productMinutes: product.duration_minutes, cfg,
-        });
-        overtimeUnits = ot.stepUnits;
-        overtimeFee = ot.feeCents;
-        overtimeMinutes = ot.overtimeMinutes;
-      }
+      // 超时：只算出「超了多少分钟」供界面提示，不再计算费用。
+      // 超时费由店家线下自行决定，需要加收时店员手动填实收。
+      const overtimeMinutes = (product.overtime_applicable && !usedCard)
+        ? overtimeMinutesOf(actualMinutes, product.duration_minutes)
+        : 0;
+      const overtimeUnits = 0;
+      const overtimeFee = 0;
 
       const productAmount = Number(s.product_price_cents ?? 0);
       const discountDay = isDiscountDay(now, cfg);

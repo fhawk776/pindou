@@ -423,18 +423,10 @@
       var elapsed = Math.max(0, Math.floor((Date.now() - new Date(ss.startedAt)) / 60000));
 
       /*
-       * 超时费：阶梯式，与后端 calcOvertimeFee 保持一致。
-       *   超时 1–baseMin 分钟        → baseFee
-       *   之后每满 stepMin 分钟      → 加收 stepFee（不足一段按一段算）
-       * 规则来自 settings.pricing，可在设置页调整。
+       * 超时：只计时、不计费（与后端一致）。
+       * 超时费改由店家线下自行决定，系统只算出「超了多少分钟」供界面提示；
+       * 需要加收时，店员在结账弹窗里手动填实收金额。
        */
-      var cfg = (DB.settings && DB.settings.pricing) || {};
-      var baseMin = cfg.overtime_base_minutes != null ? cfg.overtime_base_minutes : 20;
-      var baseFee = cfg.overtime_base_fee_cents != null ? cfg.overtime_base_fee_cents : 500;
-      var stepMin = cfg.overtime_step_minutes != null ? cfg.overtime_step_minutes : 10;
-      var stepFee = cfg.overtime_step_fee_cents != null ? cfg.overtime_step_fee_cents : 188;
-      var roundUp = cfg.overtime_round_up !== false;
-
       var overtimeMinutes = 0;
       var overtimeUnits = 0;
       var overtimeFee = 0;
@@ -442,12 +434,6 @@
         var productMinutes = prod2.durationMinutes || null;
         if (productMinutes && elapsed > productMinutes) {
           overtimeMinutes = elapsed - productMinutes;
-          overtimeFee = baseFee;
-          var beyond = overtimeMinutes - baseMin;
-          if (beyond > 0) {
-            overtimeUnits = roundUp ? Math.ceil(beyond / stepMin) : Math.floor(beyond / stepMin);
-            overtimeFee += overtimeUnits * stepFee;
-          }
         }
       }
 
@@ -541,23 +527,9 @@
       DB.products.products.forEach(function (p) { if (p.name === ss3.productName) prod3 = p; });
 
       var elapsed3 = Math.max(0, Math.floor((Date.now() - new Date(ss3.startedAt)) / 60000));
-      var cfg3 = (DB.settings && DB.settings.pricing) || {};
+      // 超时：只计时不计费（与后端一致）。店家线下自行决定收多少，
+      // 需要加收时店员在结账弹窗里手动填实收。
       var otFee3 = 0, otUnits3 = 0;
-      if (!ss3.usedCard && prod3.overtimeApplicable && prod3.durationMinutes
-          && elapsed3 > prod3.durationMinutes) {
-        var over3 = elapsed3 - prod3.durationMinutes;
-        var bMin = cfg3.overtime_base_minutes != null ? cfg3.overtime_base_minutes : 20;
-        var bFee = cfg3.overtime_base_fee_cents != null ? cfg3.overtime_base_fee_cents : 500;
-        var sMin = cfg3.overtime_step_minutes != null ? cfg3.overtime_step_minutes : 10;
-        var sFee = cfg3.overtime_step_fee_cents != null ? cfg3.overtime_step_fee_cents : 188;
-        var rUp = cfg3.overtime_round_up !== false;
-        otFee3 = bFee;
-        var beyond3 = over3 - bMin;
-        if (beyond3 > 0) {
-          otUnits3 = rUp ? Math.ceil(beyond3 / sMin) : Math.floor(beyond3 / sMin);
-          otFee3 += otUnits3 * sFee;
-        }
-      }
 
       // 与预览共用同一套校验，保证两个接口结论一致
       var addonSum3 = 0;
