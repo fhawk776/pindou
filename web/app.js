@@ -262,6 +262,13 @@ function seatCard(t) {
     </div>`;
   }
 
+  // 双人套餐占多个台时，标出"这一组还占着别的台"，
+  // 避免店员以为还有空位、或者把同一组当成两单。
+  const groupNames = (s.groupTableNames || '').split('、').filter(Boolean);
+  const multiTable = groupNames.length > 1
+    ? `<div class="seat-group">🔗 同组 ${esc(s.groupTableNames)} · 合并一张单</div>`
+    : '';
+
   return `<div class="${cls === 'occupied' ? 'seat occupied' : 'seat ' + cls}"
                data-seat="${s.sessionId}"
                data-state="${cls}"
@@ -276,6 +283,7 @@ function seatCard(t) {
       <span>${esc(s.displayName)}</span>
     </div>
     <div class="seat-meta">🕐 ${timeRange}</div>
+    ${multiTable}
     ${timerHtml}
   </div>`;
 }
@@ -396,8 +404,13 @@ async function OpenTablePage() {
     member = md.member;
   }
 
+  // 双人套餐：两人各坐一张单人工位时，需要额外占一个台。
+  // 仍然只创建一个会话 —— 一套计时、一张单、一次超时费。
+  const board = await api.get('/api/v1/board');
+  const idleTables = board.tables.filter((t) => t.status === 'idle' && t.tableId !== tableId);
+
   // 把本次开台的对象存进状态，避免把用户输入的称呼拼进 onclick（会破坏 JS 语法）
-  state.openTarget = { tableId, memberId, guestName };
+  state.openTarget = { tableId, memberId, guestName, extraTableIds: [], idleTables };
 
   const who = member ? member.displayName : guestName;
 
@@ -420,6 +433,15 @@ async function OpenTablePage() {
   ${topbar(`${table.name} · ${who}`, 'board')}
   <div class="page">
     <div id="ot-error"></div>
+
+    <div class="card">
+      <div class="card-title">占用桌位</div>
+      <div id="table-picker" class="table-picker">${tablePickerInner(idleTables, table.name)}</div>
+      <div id="table-choices"></div>
+      <div class="hint" style="font-size:12px;color:var(--text-dim);margin-top:6px">
+        双人套餐两人各坐一桌时，点「＋ 加一个台」。仍是<b>一套计时、一张单、一次超时费</b>。
+      </div>
+    </div>
 
     ${member && member.cardType && member.cardValid && !member.cardFrozen ? (
       member.cardActivated ? `
@@ -551,6 +573,61 @@ function pickGuest(tableId) {
   go('openTable', { tableId, guestName: name, step: 'product' });
 }
 
+/* ---------------------------------------------------------------------------
+ * 开台时的桌位选择（双人套餐可占两个台）
+ *
+ * 一次开台可以占多个工位，但始终只有一个会话：
+ * 一套计时、一张结账单、一次超时费。这里只负责"占哪几张桌子"。
+ * ------------------------------------------------------------------------- */
+
+/** 渲染桌位选择条：主台 + 已加的附加台 + 添加入口 */
+function tablePickerInner(idleTables, primaryName) {
+  const extra = state.openTarget?.extraTableIds ?? [];
+  const chips = extra.map((id) => {
+    const t = (idleTables ?? []).find((x) => x.tableId === id);
+    return `<span class="tp-chip">${esc(t ? t.tableName : '台' + id)}
+      <b onclick="toggleExtraTable(${id})" title="移除">×</b></span>`;
+  }).join('');
+  const canAdd = extra.length < 3;
+  return `<span class="tp-chip primary">${esc(primaryName)} · 主台</span>${chips}` +
+    (canAdd ? `<span class="tp-add" onclick="showTableChoices()">＋ 加一个台</span>` : '');
+}
+
+/** 展开可选桌位列表 */
+function showTableChoices() {
+  const el = $('#table-choices');
+  const t = state.openTarget;
+  if (!el || !t) return;
+  const extra = t.extraTableIds ?? [];
+  const avail = (t.idleTables ?? []).filter((x) => !extra.includes(x.tableId));
+  if (avail.length === 0) {
+    el.innerHTML = `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">没有其他空闲桌位了</div>`;
+    return;
+  }
+  el.innerHTML = `<div class="tp-choices">
+    ${avail.map((x) => `<button class="tp-choice" onclick="toggleExtraTable(${x.tableId})">${esc(x.tableName)}</button>`).join('')}
+  </div>`;
+}
+
+/** 加入 / 移除一个附加桌位（局部刷新，不整页重渲染） */
+function toggleExtraTable(tableId) {
+  const t = state.openTarget;
+  if (!t) return;
+  const arr = t.extraTableIds ?? [];
+  const i = arr.indexOf(tableId);
+  if (i >= 0) arr.splice(i, 1); else arr.push(tableId);
+  t.extraTableIds = arr;
+
+  const picker = $('#table-picker');
+  if (picker && t.idleTables) {
+    const primary = document.querySelector('.tp-chip.primary');
+    const primaryName = primary ? primary.textContent.replace(' · 主台', '') : '';
+    picker.innerHTML = tablePickerInner(t.idleTables, primaryName);
+  }
+  const ch = $('#table-choices');
+  if (ch) ch.innerHTML = '';
+}
+
 /**
  * 开台。
  * 只接收 productId，其余（桌位、会员、散客称呼）从 state.openTarget 读取。
@@ -630,6 +707,7 @@ async function reallyOpenWithProduct(productId) {
       memberId: target.memberId,
       guestName: target.guestName,
       productId,
+      extraTableIds: target.extraTableIds ?? [],
     });
     state.openTarget = null;
     toast(`${r.tableName} 开台成功 · ${r.productName}`);
@@ -693,6 +771,7 @@ async function openWithCard(tableId, memberId) {
   try {
     const r = await api.post('/api/v1/sessions', {
       tableId, memberId, useCard: true, productId: null,
+      extraTableIds: state.openTarget?.extraTableIds ?? [],
     });
     const when = r.boughtCard
       ? `已办卡 ¥${yuan(r.boughtCard.priceCents)} · `
@@ -774,6 +853,7 @@ async function reallyOpenWithCardProduct(productId) {
       useCard: true,
       cardProductId: productId,
       cardPaymentMethod: state.lastPayMethod || 'cash',
+      extraTableIds: target.extraTableIds ?? [],
     });
     state.openTarget = null;
     const cardMsg = r.boughtCard ? `已办卡 ¥${yuan(r.boughtCard.priceCents)} · ` : '';

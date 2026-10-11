@@ -235,7 +235,8 @@ export async function grantCard(
  */
 export async function activateCard(
   client: pg.PoolClient,
-  memberId: number
+  memberId: number,
+  operatorId: number
 ): Promise<{ startedAt: string; expiresAt: string; justActivated: boolean }> {
   const { rows } = await client.query(
     `SELECT card_started_at, card_expires_at, card_pending_days
@@ -273,6 +274,23 @@ export async function activateCard(
             row_version = row_version + 1
       WHERE id = $3`,
     [startedAt, expiresAt, memberId]
+  );
+
+  // 补记一条「激活」流水。
+  // 办卡时是未激活状态，card_records 里那条 issue 的起止日期是空的；
+  // 真正管到哪天是在这里才确定的，不补记的话追溯链条就断了。
+  const { rows: trows } = await client.query(
+    'SELECT card_type FROM members WHERE id = $1', [memberId]
+  );
+  await client.query(
+    `INSERT INTO card_records
+       (member_id, action, card_type, started_at, expires_at, amount_cents, order_id, operator_id, reason)
+     VALUES ($1,'activate',$2,$3,$4,0,NULL,$5,$6)`,
+    [
+      memberId, trows[0]?.card_type ?? null, startedAt, expiresAt,
+      operatorId,
+      `首次用卡开台，权益 ${startedAt} 至 ${expiresAt}（共 ${pendingDays} 天）`,
+    ]
   );
 
   return { startedAt, expiresAt, justActivated: true };

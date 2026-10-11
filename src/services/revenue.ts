@@ -396,9 +396,18 @@ export async function reconcile() {
     const { rows } = await client.query(`
       WITH
       -- 到店消费：流水侧
+      --
+      -- 必须把「订单作废产生的反向流水」也算进来：
+      --   作废订单时 consume 流水保留不删（只追加原则），另写一条 refund 负数流水；
+      --   而订单侧用 status <> 'voided'，作废单已被排除。
+      --   若流水侧只统计 consume，就会出现"订单侧没有、流水侧还在"的假性不平。
+      -- 判据用 order_id IS NOT NULL：退卡产生的 refund 流水 order_id 为空，
+      -- 属于办卡侧（见下面的 card_refund_ledger），不会混淆。
       consume_ledger AS (
         SELECT COALESCE(SUM(amount_cents), 0)::bigint AS v
-          FROM revenue_ledger WHERE flow_type = 'consume'
+          FROM revenue_ledger
+         WHERE flow_type = 'consume'
+            OR (flow_type = 'refund' AND order_id IS NOT NULL)
       ),
       -- 到店消费：订单侧（排除含卡项的订单，那些属于办卡）
       consume_orders AS (

@@ -274,11 +274,16 @@ export async function getMemberDetail(memberId: number) {
       [memberId]
     );
 
-    // 到店记录（即拼豆记录）
+    // 到店记录（即拼豆记录）。
+    // 双人套餐会占两个台，因此额外聚合出本次占用的全部桌位名。
     const { rows: visits } = await client.query(
       `SELECT ts.id, ts.product_name, ts.started_at, ts.ended_at, ts.actual_minutes,
               ts.overtime_units, ts.used_card, ts.status,
-              t.name AS table_name
+              t.name AS table_name,
+              (SELECT string_agg(t2.name, '、' ORDER BY st2.is_primary DESC, t2.id)
+                 FROM session_tables st2
+                 JOIN tables t2 ON t2.id = st2.table_id
+                WHERE st2.session_id = ts.id) AS table_names
          FROM table_sessions ts
          LEFT JOIN tables t ON t.id = ts.table_id
         WHERE ts.member_id = $1
@@ -329,6 +334,8 @@ export async function getMemberDetail(memberId: number) {
       visits: visits.map((v) => ({
         id: Number(v.id),
         tableName: v.table_name,
+        /** 本次占用的全部桌位（双人套餐会有两个台） */
+        tableNames: (v.table_names as string) ?? v.table_name,
         productName: v.product_name,
         startedAt: v.started_at,
         endedAt: v.ended_at,

@@ -11,7 +11,7 @@ import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { getPool, closePool } from '../src/lib/db.js';
 import { assertTestDatabase } from './helpers/guard.js';
-import { openTable, settleSession, changeSessionProduct } from '../src/services/tables.js';
+import { openTable, settleSession, changeSessionProduct, getTableBoard } from '../src/services/tables.js';
 import { addDaysStr } from '../src/lib/dates.js';
 import { createMember, purchaseCard } from '../src/services/members.js';
 import { listLedger, getRevenueSummary, reconcile, voidOrder } from '../src/services/revenue.js';
@@ -549,6 +549,72 @@ describe('工位与计费（集成测试）', () => {
       addDaysStr(String(r.startedAt), 6), String(r.expiresAt),
       '新一期仍应覆盖 7 个日历日'
     );
+  });
+
+  test('双人套餐占两个台：仍是一套计时、一张单、一次超时费', async (t) => {
+    if (!dbAvailable) return t.skip('数据库不可用');
+    const m = await mkMember();
+
+    // 双人3小时 ¥68.80，占 01 + 02 两个台
+    const r = await openTable({
+      tableId, extraTableIds: [tableId2], memberId: m,
+      productId: P.T3H_D!, operatorId: userId,
+    });
+
+    assert.equal(r.tableNames.length, 2, '应占用两个台');
+    assert.ok(r.tableNames.includes('01号桌') || r.tableNames.length === 2);
+
+    // 两个台都被标记为占用，且指向同一个会话
+    const board = await getTableBoard();
+    const occupied = board.tables.filter((x) => x.session?.sessionId === r.sessionId);
+    assert.equal(occupied.length, 2, '看板上有两个台显示同一会话');
+    for (const card of occupied) {
+      assert.equal(
+        card.session!.groupTableNames,
+        r.tableNames.join('、'),
+        '每个台都能看到本组占用的全部桌位'
+      );
+    }
+
+    // 只产生一个会话
+    const { rows: sess } = await getPool().query(
+      `SELECT count(*)::int AS c FROM table_sessions WHERE member_id = $1 AND status = 'active'`,
+      [m]
+    );
+    assert.equal(sess[0].c, 1, '双人套餐只创建一个会话');
+
+    // 两个台都记在 session_tables 里
+    const { rows: st } = await getPool().query(
+      `SELECT count(*)::int AS c FROM session_tables WHERE session_id = $1`, [r.sessionId]
+    );
+    assert.equal(st[0].c, 2, 'session_tables 里应有两条记录');
+
+    // 结账：整组一起结，只出一个订单、一次超时费
+    const settled = await settleSession({
+      sessionId: r.sessionId, paymentMethod: 'cash', operatorId: userId,
+    });
+    assert.equal(settled.totalCents, 6880, '双人套餐应收 ¥68.80（只收一次）');
+
+    // 结账后两个台都释放
+    const board2 = await getTableBoard();
+    const still = board2.tables.filter((x) =>
+      r.tableNames.includes(x.tableName) && x.status === 'occupied');
+    assert.equal(still.length, 0, '结账后两个台都应释放');
+
+    // 防重复占用：第一个台已被别人占时，第二个台也不能再被抢
+    const m2 = await mkMember();
+    const r2 = await openTable({
+      tableId, memberId: m2, productId: P.T1H_S!, operatorId: userId,
+    });
+    await assert.rejects(
+      () => openTable({
+        tableId: tableId2, extraTableIds: [tableId], memberId: null,
+        guestName: '插队的', productId: P.T1H_S!, operatorId: userId,
+      }),
+      /正在使用中/,
+      '其中一个台被占用时，整组开台都应被拒绝'
+    );
+    await settleSession({ sessionId: r2.sessionId, paymentMethod: 'cash', operatorId: userId });
   });
 
   test('两个入口买同一张卡：权益效果必须完全一致', async (t) => {

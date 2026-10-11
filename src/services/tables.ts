@@ -272,6 +272,14 @@ async function nextFlowNo(client: pg.PoolClient): Promise<string> {
 // ===========================================================================
 export interface OpenTableInput {
   tableId: number;
+  /**
+   * 本次开台占用的「附加桌位」（不含 tableId）。
+   *
+   * 用于双人套餐：两个人各坐一张单人工位，但买的是一个套餐、
+   * 一次结账、一次超时费。因此仍然只创建一个会话，只是多占几张桌子。
+   * tableId 视为主台（换套餐、看板带出顾客信息以它为准）。
+   */
+  extraTableIds?: number[];
   memberId: number | null;
   guestName?: string | null;
   /**
@@ -299,6 +307,8 @@ export interface OpenTableInput {
 export async function openTable(input: OpenTableInput): Promise<{
   sessionId: number;
   tableName: string;
+  /** 本次占用的全部桌位名（第一个是主台），用于提示与看板 */
+  tableNames: string[];
   productName: string;
   startedAt: Date;
   expectedEndAt: Date | null;
@@ -310,23 +320,40 @@ export async function openTable(input: OpenTableInput): Promise<{
 }> {
   const { tableId, memberId, productId, operatorId } = input;
 
-  return withTransaction(async (client) => {
-    // 工位必须可用
-    const { rows: trows } = await client.query(
-      'SELECT id, name, status, is_active FROM tables WHERE id = $1 FOR UPDATE',
-      [tableId]
-    );
-    if (trows.length === 0) throw new TableError('工位不存在');
-    const table = trows[0];
-    if (!table.is_active) throw new TableError('该工位已停用');
-    if (table.status === 'maintenance') throw new TableError('该工位正在维护中');
+  // 本次占用的全部桌位：主台 + 附加台，去重、去无效值。
+  // 排序后统一锁，避免两个并发开台以不同顺序锁同一批桌位而死锁。
+  const allTableIds = Array.from(
+    new Set([tableId, ...(input.extraTableIds ?? [])].filter((n) => Number.isInteger(n) && n > 0))
+  ).sort((a, b) => a - b);
+  if (allTableIds.length > 4) throw new TableError('一次最多占用 4 个台');
 
-    // 工位不能已被占用（数据库层有唯一索引兜底，这里给出友好提示）
-    const { rows: busy } = await client.query(
-      `SELECT id FROM table_sessions WHERE table_id = $1 AND status = 'active'`,
-      [tableId]
+  return withTransaction(async (client) => {
+    // 桌位必须都可用（按 id 升序锁，避免死锁）
+    const { rows: trows } = await client.query(
+      `SELECT id, name, status, is_active FROM tables
+        WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
+      [allTableIds]
     );
-    if (busy.length > 0) throw new TableError(`${table.name} 正在使用中`);
+    if (trows.length !== allTableIds.length) throw new TableError('有桌位不存在');
+    for (const t of trows) {
+      if (!t.is_active) throw new TableError(`${t.name} 已停用`);
+      if (t.status === 'maintenance') throw new TableError(`${t.name} 正在维护中`);
+    }
+
+    // 桌位不能已被别的活跃会话占用。
+    // 走 session_tables（一个会话可能占多个台），不是只看 table_sessions.table_id。
+    const { rows: busy } = await client.query(
+      `SELECT t.name FROM session_tables st
+         JOIN table_sessions ts ON ts.id = st.session_id
+         JOIN tables t ON t.id = st.table_id
+        WHERE st.table_id = ANY($1::bigint[]) AND ts.status = 'active'`,
+      [allTableIds]
+    );
+    if (busy.length > 0) {
+      throw new TableError(`${busy.map((b) => b.name).join('、')} 正在使用中`);
+    }
+
+    const table = trows.find((t) => Number(t.id) === tableId) ?? trows[0];
 
     // 会员校验
     let memberRow: {
@@ -347,15 +374,17 @@ export async function openTable(input: OpenTableInput): Promise<{
       if (rows[0].status !== 'active') throw new TableError('该会员已停用');
       memberRow = rows[0];
 
-      // 该会员不能已经在别的工位
+      // 该会员不能已经在别处开台（可能占多台，把台名一起列出来）
       const { rows: mBusy } = await client.query(
-        `SELECT ts.id, t.name FROM table_sessions ts
-           JOIN tables t ON t.id = ts.table_id
+        `SELECT string_agg(t.name, '、' ORDER BY st.is_primary DESC, t.id) AS names
+           FROM table_sessions ts
+           JOIN session_tables st ON st.session_id = ts.id
+           JOIN tables t ON t.id = st.table_id
           WHERE ts.member_id = $1 AND ts.status = 'active'`,
         [memberId]
       );
-      if (mBusy.length > 0) {
-        throw new TableError(`该会员已在 ${mBusy[0].name} 开台，请先结账`);
+      if (mBusy.length > 0 && mBusy[0].names) {
+        throw new TableError(`该会员已在 ${mBusy[0].names} 开台，请先结账`);
       }
     } else {
       // 散客必须有称呼，便于店员喊人。
@@ -403,7 +432,7 @@ export async function openTable(input: OpenTableInput): Promise<{
       }
 
       // 未激活 → 此刻激活并写入本期起止；已激活 → 校验是否过期
-      const act = await activateCard(client, memberId);
+      const act = await activateCard(client, memberId, operatorId);
       cardStartedAt = act.startedAt;
       cardExpiresAt = act.expiresAt;
     }
@@ -452,6 +481,15 @@ export async function openTable(input: OpenTableInput): Promise<{
       ]
     );
 
+    // 记录本次占用的所有桌位（双人套餐会有两个台）。
+    // 主台 is_primary = true，换套餐与看板展示以它为准。
+    for (const tid of allTableIds) {
+      await client.query(
+        `INSERT INTO session_tables (session_id, table_id, is_primary) VALUES ($1,$2,$3)`,
+        [srows[0].id, tid, tid === tableId]
+      );
+    }
+
     // 会员到店次数 +1；用卡则核销次数 +1
     if (memberId !== null) {
       await client.query(
@@ -491,6 +529,7 @@ export async function openTable(input: OpenTableInput): Promise<{
     return {
       sessionId: Number(srows[0].id),
       tableName: table.name as string,
+      tableNames: trows.map((t) => t.name as string),
       productName: sessionLabel,
       startedAt: srows[0].started_at as Date,
       expectedEndAt: srows[0].expected_end_at as Date | null,
@@ -687,7 +726,9 @@ export async function cancelSession(
         WHERE id = $1`,
       [sessionId]
     );
-    await client.query(`UPDATE tables SET status = 'idle' WHERE id = $1`, [s.table_id]);
+    // 不需要动 tables.status：桌位是否被占用由「是否存在活跃会话」决定
+    // （看板通过 session_tables JOIN table_sessions.status='active' 判断）。
+    // 早前这里会把 tables.status 改成 'idle'，那会把"维护中"的桌位误改成空闲。
 
     await writeAudit(client, {
       actorId: operatorId,
@@ -1077,6 +1118,11 @@ export interface TableCard {
     paused: boolean;
     /** 暂停开始时间（未暂停为 null） */
     pausedAt: string | null;
+    /**
+     * 这一组占用的全部桌位名，如「01号桌、02号桌」。
+     * 双人套餐会占两个台，看板据此提示"这一组还占着别的台"。
+     */
+    groupTableNames: string | null;
     /** 提醒级别 */
     alertLevel: 'normal' | 'warning' | 'overtime';
   } | null;
@@ -1097,9 +1143,16 @@ export async function getTableBoard(): Promise<{
               ts.product_name, ts.started_at, ts.expected_end_at, ts.used_card,
               ts.paused_at,
               m.nickname, m.phone_tail, m.member_no, m.card_type, m.card_expires_at,
-              p.category
+              p.category,
+              -- 该会话占用的全部桌位（双人套餐会占两个台）。
+              -- 每个被占的台都会带出同一份信息，前端据此显示「01号桌、02号桌」。
+              (SELECT string_agg(t2.name, '、' ORDER BY st2.is_primary DESC, t2.id)
+                 FROM session_tables st2
+                 JOIN tables t2 ON t2.id = st2.table_id
+                WHERE st2.session_id = ts.id) AS group_table_names
          FROM tables t
-         LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'active'
+         LEFT JOIN session_tables st ON st.table_id = t.id
+         LEFT JOIN table_sessions ts ON ts.id = st.session_id AND ts.status = 'active'
          LEFT JOIN members m ON m.id = ts.member_id
          LEFT JOIN products p ON p.id = ts.product_id
         WHERE t.is_active = true
@@ -1171,6 +1224,7 @@ export async function getTableBoard(): Promise<{
           cardExpiresAt: toDateString(r.card_expires_at),
           paused,
           pausedAt: r.paused_at ? new Date(r.paused_at as Date).toISOString() : null,
+          groupTableNames: (r.group_table_names as string) ?? null,
           alertLevel,
         },
       };

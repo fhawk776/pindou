@@ -183,6 +183,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = requireAuth(req);
     const body = parse(z.object({
       tableId: z.number().int().positive(),
+      /**
+       * 附加桌位（不含 tableId）。双人套餐两人各坐一张单人工位时传。
+       * 仍然只创建一个会话（一套计时、一个订单、一次超时费）。
+       */
+      extraTableIds: z.array(z.number().int().positive()).max(3).optional(),
       memberId: z.number().int().positive().nullable().default(null),
       guestName: z.string().max(20).nullish(),
       // 用卡核销时不需要套餐。
@@ -216,6 +221,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     return openTable({
       tableId: body.tableId, memberId: body.memberId,
+      extraTableIds: body.extraTableIds ?? [],
       guestName: body.guestName ?? null, productId: body.productId ?? null,
       useCard: body.useCard,
       cardProductId: body.cardProductId ?? null,
@@ -237,7 +243,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     return withTransaction(async (client) => {
       const { rows } = await client.query(
-        `SELECT ts.*, t.name AS table_name, m.nickname, m.phone_tail, m.member_no,
+        `SELECT ts.*, t.name AS table_name,
+                (SELECT string_agg(t2.name, '、' ORDER BY st2.is_primary DESC, t2.id)
+                   FROM session_tables st2
+                   JOIN tables t2 ON t2.id = st2.table_id
+                  WHERE st2.session_id = ts.id) AS table_names,
+                m.nickname, m.phone_tail, m.member_no,
                 m.card_type,
                 m.card_expires_at AS card_expires_at_member
            FROM table_sessions ts
@@ -267,6 +278,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           id: Number(s.id),
           tableId: Number(s.table_id),
           tableName: s.table_name,
+          /** 本次占用的全部桌位名（双人套餐会有两个台） */
+          tableNames: (s.table_names as string) ?? s.table_name,
           memberId: s.member_id === null ? null : Number(s.member_id),
           memberName: s.nickname
             ? [s.nickname, s.phone_tail].filter(Boolean).join(' · ')

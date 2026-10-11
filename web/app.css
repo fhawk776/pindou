@@ -722,3 +722,31 @@ body::before {
 @media (min-width: 720px) {
   .page { padding: 20px; }
 }
+
+/* ===== 开台时的桌位选择（双人套餐可占两个台）===== */
+.table-picker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tp-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 20px; font-size: 13px; font-weight: 600;
+  background: var(--pink-light); color: var(--pink-deep);
+}
+.tp-chip.primary { background: var(--pink); color: #fff; }
+.tp-chip b { cursor: pointer; font-size: 15px; opacity: .7; line-height: 1; }
+.tp-chip b:hover { opacity: 1; }
+.tp-add {
+  padding: 6px 12px; border-radius: 20px; font-size: 13px; cursor: pointer;
+  border: 1.5px dashed var(--pink); color: var(--pink-deep); background: #fff;
+}
+.tp-add:hover { background: var(--pink-pale); }
+.tp-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.tp-choice {
+  padding: 6px 14px; border-radius: 10px; font-size: 13px; cursor: pointer;
+  border: 1.5px solid #E5DCE1; background: #fff; color: var(--text);
+}
+.tp-choice:hover { border-color: var(--pink); color: var(--pink-deep); }
+
+/* 看板上标出"这一组还占着别的台" */
+.seat-group {
+  font-size: 12px; font-weight: 600; color: var(--pink-deep);
+  margin-top: 4px;
+}
