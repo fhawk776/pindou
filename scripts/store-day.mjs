@@ -225,6 +225,31 @@ check('两个台都释放',
   board.tables.filter((t) => idleIds[5] === t.tableId || idleIds[6] === t.tableId).every((t) => t.status === 'idle'),
   'true');
 
+// 人数限制：单人套餐只能占 1 个台，双人套餐最多 2 个台
+const m4b = (await api('POST', '/api/v1/members', { nickname: '人数测试', phoneTail: '5555' })).data;
+const oneOnTwo = await api('POST', '/api/v1/sessions', {
+  tableId: idleIds[5], extraTableIds: [idleIds[6]], memberId: m4b.id, productId: P.T1H_S.id,
+});
+check('单人套餐不能占 2 个台', oneOnTwo.status, 400);
+check('提示是单人套餐', String(oneOnTwo.data?.error?.message ?? '').includes('单人套餐'), 'true');
+
+const twoOnTwo = await api('POST', '/api/v1/sessions', {
+  tableId: idleIds[5], extraTableIds: [idleIds[6]], memberId: m4b.id, productId: P.T1H_D.id,
+});
+check('双人套餐可以占 2 个台', twoOnTwo.ok, 'true');
+await api('POST', `/api/v1/sessions/${twoOnTwo.data.sessionId}/settle`, { paymentMethod: 'cash' });
+
+const twoOnThree = await api('POST', '/api/v1/sessions', {
+  tableId: idleIds[5], extraTableIds: [idleIds[6], idleIds[7]], memberId: m4b.id, productId: P.T1H_D.id,
+});
+check('双人套餐不能占 3 个台', twoOnThree.status, 400);
+
+// 用卡核销也是个人权益，只能占 1 个台
+const cardOnTwo = await api('POST', '/api/v1/sessions', {
+  tableId: idleIds[5], extraTableIds: [idleIds[6]], memberId: m2.id, productId: null, useCard: true,
+});
+check('用卡核销不能占 2 个台', cardOnTwo.status, 400);
+
 // ---------------------------------------------------------------- 换套餐
 section('⑨ 换套餐');
 const r8 = await api('POST', '/api/v1/sessions', {

@@ -674,6 +674,21 @@ async function openWithProduct(productId) {
 
   const who = target.guestName ? `散客：${target.guestName}` : '会员（已选择）';
 
+  // 套餐人数决定最多占几个台：单人套餐 1 个、双人套餐 2 个。
+  // 店员可能先加了台再选套餐，这里自动收起到合规数量并提示，
+  // 避免出现「界面显示两个台、开台只开一个」这种前后不一致。
+  const maxTables = prod.peopleCount ?? 1;
+  const extras = state.openTarget.extraTableIds ?? [];
+  if (1 + extras.length > maxTables) {
+    state.openTarget.extraTableIds = extras.slice(0, Math.max(0, maxTables - 1));
+    toast(
+      maxTables === 1
+        ? `「${prod.name}」是单人套餐，已收起多余的台`
+        : `「${prod.name}」最多占 ${maxTables} 个台，已收起多余的`,
+      'warn'
+    );
+  }
+
   // 说明文字必须按套餐类型区分：
   // 限时套餐按分钟计费并计超时；限板与日卡不限时，既不倒计时也不收超时费。
   let note;
@@ -778,6 +793,15 @@ async function runConfirmAction() {
  */
 async function openWithCard(tableId, memberId) {
   const errBox = $('#ot-error');
+
+  // 卡是个人权益（卡类人数都是 1），只能占 1 个台。
+  // 店员若事先加了台，这里收起来并说明，避免被后端拒绝后一头雾水。
+  const extras = state.openTarget?.extraTableIds ?? [];
+  if (extras.length > 0) {
+    state.openTarget.extraTableIds = [];
+    toast('卡权益是个人权益，只能占 1 个台，已收起多余的', 'warn');
+  }
+
   try {
     const r = await api.post('/api/v1/sessions', {
       tableId, memberId, useCard: true, productId: null,
@@ -833,6 +857,14 @@ async function openWithCardProduct(productId) {
   }
 
   const days = prod.cardValidDays ?? 7;
+
+  // 卡是个人权益（卡类人数都是 1），只能占 1 个台。
+  const extras = state.openTarget.extraTableIds ?? [];
+  if (extras.length > 0) {
+    state.openTarget.extraTableIds = [];
+    toast('卡权益是个人权益，只能占 1 个台，已收起多余的', 'warn');
+  }
+
   state.confirmDialog = {
     title: '办卡并开台',
     lines: [

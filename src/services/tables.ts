@@ -440,13 +440,13 @@ export async function openTable(input: OpenTableInput): Promise<{
     // 套餐：用卡核销时不需要套餐（卡是全天不限时的通行权益）
     let product: {
       id: number | null; name: string | null; price_cents: number;
-      duration_minutes: number | null;
+      duration_minutes: number | null; people_count: number;
     } | null = null;
 
     if (!useCard) {
       const { rows: prows } = await client.query(
         `SELECT id, name, category, price_cents::bigint AS price_cents,
-                duration_minutes, card_type, card_valid_days
+                duration_minutes, card_type, card_valid_days, people_count
            FROM products WHERE id = $1 AND is_active = true`,
         [productId]
       );
@@ -456,7 +456,23 @@ export async function openTable(input: OpenTableInput): Promise<{
         name: prows[0].name as string,
         price_cents: Number(prows[0].price_cents),
         duration_minutes: prows[0].duration_minutes as number | null,
+        people_count: Number(prows[0].people_count ?? 1),
       };
+    }
+
+    // 占几个台由套餐人数决定：
+    //   单人套餐（people_count=1）→ 只能占 1 个台
+    //   双人套餐（people_count=2）→ 最多 2 个台
+    //   用卡核销 / 办卡 → 卡是个人权益（卡类 people_count 均为 1）→ 1 个台
+    // 前端会做同样的判断并给出友好提示，这里是服务端的硬约束，
+    // 防止绕过界面直接调接口开出超额的台。
+    const maxTables = product ? product.people_count : 1;
+    if (allTableIds.length > maxTables) {
+      throw new TableError(
+        maxTables === 1
+          ? '这是单人套餐（或个人权益），只能占 1 个台。请先移除多余的桌位。'
+          : `「${product?.name ?? '该套餐'}」是 ${maxTables} 人套餐，最多占 ${maxTables} 个台。`
+      );
     }
 
     // 预计结束时间：
