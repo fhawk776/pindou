@@ -556,7 +556,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const showAll = q.includeInactive === 'true';
     const conds: string[] = showAll ? [] : ['is_active = true'];
     const vals: unknown[] = [];
-    if (q.category) { vals.push(q.category); conds.push(`category = ${vals.length}`); }
+    // 注意 $${vals.length} 生成的是参数占位符 $1。
+    // 若误写成 ${vals.length}，会生成字面量 "category = 1"，
+    // PostgreSQL 找不到 text = integer 的操作符，报 42883 undefined_function。
+    if (q.category) { vals.push(q.category); conds.push(`category = $${vals.length}`); }
 
     const { rows } = await getPool().query(
       `SELECT id, code, name, category, price_cents::bigint AS price_cents,

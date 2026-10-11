@@ -79,6 +79,21 @@ $m2 = Api POST '/api/v1/members' @{ nickname = "E2E伴$($tag.Substring(2))"; pho
 Show '会员1' "$($m1.nickname) · $($m1.memberNo)"
 Show '会员2' "$($m2.nickname) · $($m2.memberNo)"
 
+# 产品分类过滤。
+# 这个检查是补上的：路由层曾把 category = $1 误写成 category = 1（少一个 $），
+# 导致所有带 ?category= 的请求报 42883，前端表现为"点办卡没反应"。
+# 集成测试只覆盖 service 层，抓不到路由层 SQL 拼接错误，因此在这里补一道。
+Write-Host "`n=== 3.5 产品分类过滤 ===" -ForegroundColor Cyan
+foreach ($cat in 'timed', 'board', 'day', 'card', 'addon') {
+  $r = Try-Api GET "/api/v1/products?category=$cat"
+  if ($r.ok) {
+    Show $cat "$($r.data.products.Count) 个"
+  } else {
+    Write-Host "  FAIL category=$cat: $($r.error)" -ForegroundColor Red
+    exit 1
+  }
+}
+
 Write-Host "`n=== 4. 开台（限时套餐）===" -ForegroundColor Cyan
 $open1 = Api POST '/api/v1/sessions' @{
   tableId = $tableA; memberId = $m1.id; productId = $byCode['T1H_S'].id
