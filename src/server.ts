@@ -158,11 +158,23 @@ export async function buildServer() {
     await app.register(fastifyStatic, {
       root: webRoot,
       prefix: '/',
-      setHeaders(res, path) {
+      // @fastify/static v10 起，setHeaders 的第一个参数是 FastifyReply（不再是原生 res）
+      setHeaders(reply, path) {
         // HTML 不缓存，避免更新后用户拿到旧页面
-        if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
-        else res.setHeader('Cache-Control', 'public, max-age=300');
+        if (path.endsWith('.html')) reply.header('Cache-Control', 'no-cache');
+        else reply.header('Cache-Control', 'public, max-age=300');
       },
+      // 安全加固：白名单，只放行前端真正用到的文件。
+      // 静态文件组件历史上出现过路径遍历漏洞（GHSA-pr96-94w5-mx2h 等），
+      // 白名单保证即使组件出问题，也无法触及这几个文件之外的任何内容
+      // —— 包括同目录上级的 .env（内含数据库密码）。
+      allowedPath(pathName) {
+        // 注意要放行 '/'（根路径，由 index 选项解析为 index.html）
+        return ['/', '/index.html', '/app.js', '/app.css', '/favicon.ico'].includes(pathName);
+      },
+      dotfiles: 'deny',     // 显式拒绝 .env、.git 等隐藏文件
+      list: false,          // 禁止目录列表
+      index: ['index.html'],
     });
   } else {
     app.log.warn('未找到前端静态文件目录，仅提供 API');
