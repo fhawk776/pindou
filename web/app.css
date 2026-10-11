@@ -252,6 +252,11 @@ body::before {
 .mc-benefit.expired {
   background: #F4F1F3; color: var(--text-mid); border-left: 3px solid #CFC5CA;
 }
+
+/* 未激活的权益：已拥有但还没开始计时，用琥珀色区别于"生效中"的绿色 */
+.mc-benefit.pending { background: #FFF6D9; color: #8A6D00; }
+.card-badge.pending { background: rgba(255,255,255,.92); color: #8A6D00; }
+
 .mc-benefit.none {
   background: #FAF7F9; color: var(--text-dim);
   font-weight: 500; font-size: 13px; border-left: 3px solid #E8E0E4;

@@ -191,11 +191,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       //   · 也可能完全不带这个键
       productId: z.number().int().positive().nullable().optional(),
       useCard: z.boolean().default(false),
+      /**
+       * 同时办一张卡（开台页点周卡时传）。
+       * 办卡与开台同一事务，且走与会员详情页「办卡」相同的逻辑，
+       * 保证"同一个产品不管在哪买，权益效果一致"。
+       */
+      cardProductId: z.number().int().positive().nullable().optional(),
+      cardPaymentMethod: z.enum(['cash', 'wechat', 'alipay', 'other']).default('cash'),
       note: z.string().max(200).optional(),
     }), req.body);
 
-    if (!body.useCard && !body.productId) {
+    // 开台必须有"消费内容"：要么选了套餐、要么用卡核销、要么同时办卡
+    const willBuyCard = body.cardProductId != null;
+    if (!body.useCard && !willBuyCard && !body.productId) {
       const err = new Error('非用卡开台必须选择套餐');
+      (err as { statusCode?: number }).statusCode = 400;
+      throw err;
+    }
+    if (willBuyCard && body.memberId === null) {
+      const err = new Error('办卡需要先选择会员');
       (err as { statusCode?: number }).statusCode = 400;
       throw err;
     }
@@ -203,7 +217,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return openTable({
       tableId: body.tableId, memberId: body.memberId,
       guestName: body.guestName ?? null, productId: body.productId ?? null,
-      useCard: body.useCard, operatorId: user.id, note: body.note,
+      useCard: body.useCard,
+      cardProductId: body.cardProductId ?? null,
+      cardPaymentMethod: body.cardPaymentMethod,
+      operatorId: user.id, note: body.note,
     });
   });
 
@@ -287,6 +304,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = parse(z.object({ id: z.coerce.number().int().positive() }), req.params);
     const { resumeSession } = await import('../services/tables.js');
     return resumeSession(id, user.id);
+  });
+
+  /**
+   * 取消开台。用于还没结账就想撤销的情况：
+   * 顾客开台后离开、套餐选错、临时不玩了。
+   * 要求填原因（与「整单作废」一致），原因会写进审计日志。
+   * 已结账的台会被拒绝，提示改用整单作废。
+   */
+  app.post('/api/v1/sessions/:id/cancel', async (req) => {
+    const user = requireAuth(req);
+    const { id } = parse(z.object({ id: z.coerce.number().int().positive() }), req.params);
+    const body = parse(z.object({ reason: z.string().trim().min(1).max(200) }), req.body);
+    const { cancelSession } = await import('../services/tables.js');
+    return cancelSession(id, user.id, body.reason);
   });
 
   app.post('/api/v1/sessions/:id/settle', async (req) => {

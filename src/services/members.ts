@@ -8,6 +8,7 @@ import type pg from 'pg';
 import { withTransaction } from '../lib/db.js';
 import { writeAudit } from './audit.js';
 import { getShopConfig, toDateString } from './tables.js';
+import { grantCard, type GrantCardResult } from './cards.js';
 
 export class MemberError extends Error {
   constructor(message: string) {
@@ -174,9 +175,18 @@ export async function searchMembers(params: {
     const { rows } = await client.query(
       `SELECT m.id, m.member_no, m.nickname, m.phone_tail, m.joined_on,
               m.card_type, m.card_started_at, m.card_expires_at,
+              m.card_pending_days, m.card_activated_at,
               m.card_frozen, m.card_frozen_reason,
               m.visit_count, m.card_used_count, m.status,
-              (m.card_expires_at IS NOT NULL AND m.card_expires_at >= CURRENT_DATE) AS card_valid,
+              -- 可用 = 有卡种 且（未激活 或 未过期）
+              --   未激活：card_expires_at IS NULL —— 顾客办了卡还没第一次用，
+              --          此时仍可用于开台（那一下就激活并写入起止日期）
+              --   生效中：card_expires_at >= 今天
+              --   已过期：不可用
+              -- 冻结与否由 card_frozen 单独表达，前端叠加判断。
+              (m.card_type IS NOT NULL
+               AND (m.card_expires_at IS NULL OR m.card_expires_at >= CURRENT_DATE)) AS card_valid,
+              (m.card_started_at IS NOT NULL) AS card_activated,
               -- 消费口径拆分：办卡与到店消费分开统计，
               -- 避免把办卡金额算进"玩了多少钱"，两者对顾客的含义不同。
               COALESCE(o.card_paid, 0)::bigint  AS card_paid_cents,
@@ -213,6 +223,10 @@ export async function searchMembers(params: {
       cardStartedAt: toDateString(r.card_started_at),
       cardExpiresAt: toDateString(r.card_expires_at),
       cardValid: Boolean(r.card_valid),
+      // 未激活：办了卡还没第一次用卡，起止日期为空，只有待生效天数
+      cardActivated: Boolean(r.card_activated),
+      cardPendingDays: Number(r.card_pending_days ?? 0),
+      cardActivatedAt: r.card_activated_at ?? null,
       cardFrozen: Boolean(r.card_frozen),
       cardFrozenReason: (r.card_frozen_reason as string) ?? null,
       visitCount: r.visit_count as number,
@@ -232,7 +246,10 @@ export async function getMemberDetail(memberId: number) {
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `SELECT m.*,
-              (m.card_expires_at IS NOT NULL AND m.card_expires_at >= CURRENT_DATE) AS card_valid
+              -- 可用 = 有卡种 且（未激活 或 未过期）；详见 searchMembers 的说明
+              (m.card_type IS NOT NULL
+               AND (m.card_expires_at IS NULL OR m.card_expires_at >= CURRENT_DATE)) AS card_valid,
+              (m.card_started_at IS NOT NULL) AS card_activated
          FROM members m WHERE m.id = $1`,
       [memberId]
     );
@@ -292,6 +309,10 @@ export async function getMemberDetail(memberId: number) {
       cardStartedAt: toDateString(m.card_started_at),
       cardExpiresAt: toDateString(m.card_expires_at),
       cardValid: Boolean(m.card_valid),
+      // 未激活：办了卡还没第一次用卡，起止日期为空，只有待生效天数
+      cardActivated: Boolean(m.card_activated),
+      cardPendingDays: Number(m.card_pending_days ?? 0),
+      cardActivatedAt: m.card_activated_at ?? null,
       cardFrozen: Boolean(m.card_frozen),
       cardFrozenReason: (m.card_frozen_reason as string) ?? null,
       cardFrozenAt: m.card_frozen_at,
@@ -340,136 +361,15 @@ export async function purchaseCard(params: {
   paymentMethod: 'cash' | 'wechat' | 'alipay' | 'other';
   operatorId: number;
   note?: string;
-}): Promise<{
-  orderId: number;
-  orderNo: string;
-  flowNo: string;
-  priceCents: number;
-  startedAt: string;
-  expiresAt: string;
-}> {
-  const { memberId, cardType, productId, paymentMethod, operatorId } = params;
+}): Promise<GrantCardResult> {
+  const { memberId, cardType, productId, paymentMethod, operatorId, note } = params;
 
-  return withTransaction(async (client) => {
-    const { rows: mrows } = await client.query(
-      'SELECT id, member_no, nickname, card_type, card_expires_at, status FROM members WHERE id = $1 FOR UPDATE',
-      [memberId]
-    );
-    if (mrows.length === 0) throw new MemberError('会员不存在');
-    if (mrows[0].status !== 'active') throw new MemberError('该会员已停用');
-
-    const { rows: prows } = await client.query(
-      `SELECT id, name, category, price_cents::bigint AS price_cents, card_valid_days, card_type
-         FROM products WHERE id = $1 AND is_active = true`,
-      [productId]
-    );
-    if (prows.length === 0) throw new MemberError('卡种不存在');
-    const product = prows[0];
-    if (product.category !== 'card') throw new MemberError('所选项目不是卡种');
-
-    const days = Number(product.card_valid_days ?? (cardType === 'month' ? 30 : 7));
-    const price = Number(product.price_cents);
-
-    // 续卡逻辑：
-    //   起始日 —— 若原卡仍在有效期内则保持不变（展示"累计有效期"的起点），
-    //             否则以今天为新的起点。
-    //   到期日 —— 若原卡未过期则从原到期日顺延，避免浪费剩余天数；
-    //             已过期则从今天起算。
-    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
-    const oldExpires = toDateString(mrows[0].card_expires_at);
-    const oldStarted = toDateString(mrows[0].card_started_at);
-
-    let startStr: string;
-    let baseDate: Date;
-
-    if (oldExpires && oldExpires >= todayStr) {
-      // 卡还在有效期内：起点沿用，到期日顺延
-      startStr = oldStarted ?? todayStr;
-      baseDate = new Date(`${oldExpires}T00:00:00+08:00`);
-    } else {
-      // 新卡或已过期：从今天重新起算
-      startStr = todayStr;
-      baseDate = new Date(`${todayStr}T00:00:00+08:00`);
-    }
-
-    const expires = new Date(baseDate.getTime() + days * 24 * 60 * 60 * 1000);
-    const expiresStr = expires.toISOString().slice(0, 10);
-
-    // 生成订单
-    const { rows: cnt } = await client.query(
-      `SELECT COUNT(*)::int AS c FROM orders WHERE completed_at::date = CURRENT_DATE`
-    );
-    const d = new Date();
-    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    const orderNo = `O${ymd}${String((cnt[0].c as number) + 1).padStart(4, '0')}`;
-
-    const { rows: orows } = await client.query(
-      `INSERT INTO orders (
-         order_no, member_id, product_amount_cents, addon_amount_cents,
-         overtime_fee_cents, discount_cents, total_cents, paid_cents,
-         payment_method, is_discount_day, used_card, operator_id, note
-       ) VALUES ($1,$2,$3,0,0,0,$3,$3,$4,false,false,$5,$6)
-       RETURNING id`,
-      [orderNo, memberId, price, paymentMethod, operatorId, params.note ?? '']
-    );
-    const orderId = Number(orows[0].id);
-
-    await client.query(
-      `INSERT INTO order_items (order_id, product_id, name, category, qty,
-                                unit_price_cents, amount_cents, sort_order)
-       VALUES ($1,$2,$3,'card',1,$4,$4,0)`,
-      [orderId, productId, product.name, price]
-    );
-
-    // 流水
-    const { rows: fcnt } = await client.query(
-      `SELECT COUNT(*)::int AS c FROM revenue_ledger WHERE created_at::date = CURRENT_DATE`
-    );
-    const flowNo = `F${ymd}${String((fcnt[0].c as number) + 1).padStart(4, '0')}`;
-
-    await client.query(
-      `INSERT INTO revenue_ledger
-         (flow_no, flow_type, amount_cents, payment_method, member_id, order_id,
-          business_date, operator_id, remark)
-       VALUES ($1,'card_purchase',$2,$3,$4,$5,CURRENT_DATE,$6,$7)`,
-      [flowNo, price, paymentMethod, memberId, orderId, operatorId, `办理 ${product.name}`]
-    );
-
-    // 授予权益
-    await client.query(
-      `UPDATE members
-          SET card_type = $1, card_started_at = $2, card_expires_at = $3,
-              card_order_id = $4,
-              card_frozen = false, card_frozen_reason = NULL, card_frozen_at = NULL,
-              row_version = row_version + 1
-        WHERE id = $5`,
-      [product.card_type ?? cardType, startStr, expiresStr, orderId, memberId]
-    );
-
-    // 卡权益流水（续卡还是新办，用于追溯）
-    await client.query(
-      `INSERT INTO card_records
-         (member_id, action, card_type, started_at, expires_at, amount_cents, order_id, operator_id, reason)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [
-        memberId,
-        mrows[0].card_type ? 'renew' : 'issue',
-        product.card_type ?? cardType, startStr, expiresStr, price, orderId, operatorId,
-        params.note ?? '',
-      ]
-    );
-
-    await writeAudit(client, {
-      actorId: operatorId,
-      action: 'member.purchase_card',
-      targetType: 'member',
-      targetId: memberId,
-      after: { cardType: product.card_type, startedAt: startStr, expiresAt: expiresStr, price, orderNo },
-      summary: `办理 ${product.name}，有效期 ${startStr} 至 ${expiresStr}`,
-    });
-
-    return { orderId, orderNo, flowNo, priceCents: price, startedAt: startStr, expiresAt: expiresStr };
-  });
+  // 办卡核心逻辑统一在 services/cards.ts。
+  // 「会员详情页办卡」与「开台页选周卡」共用同一份实现，
+  // 保证同一个产品不管从哪个入口买，拿到的权益完全一致。
+  return withTransaction((client) =>
+    grantCard(client, { memberId, productId, cardType, paymentMethod, operatorId, note })
+  );
 }
 
 /**
@@ -543,10 +443,11 @@ export async function refundCard(params: {
       );
     }
 
-    // 作废权益
+    // 作废权益（含未激活时的待生效天数与激活时间）
     await client.query(
       `UPDATE members
           SET card_type = NULL, card_started_at = NULL, card_expires_at = NULL,
+              card_pending_days = 0, card_activated_at = NULL,
               card_order_id = NULL, card_used_count = 0,
               card_frozen = false, card_frozen_reason = NULL, card_frozen_at = NULL,
               row_version = row_version + 1

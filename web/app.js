@@ -401,19 +401,19 @@ async function OpenTablePage() {
 
   const who = member ? member.displayName : guestName;
 
-  // 卡类（周卡/月卡）刻意不列在"选套餐"里。
+  // 卡类也列在这里，但**点击行为不同**：
+  //   普通套餐 → 按套餐开台
+  //   卡权益   → 办卡 + 立即用这张卡开台（一条龙）
   //
-  // 卡是「权益」而非坐桌套餐：必须先在会员详情页「办卡」购买，
-  // 再用上方绿色按钮「用卡开台」核销，这样开出来的会话才是 used_card=true
-  // （全天不限时、不计超时、不收费）。
-  //
-  // 早前把卡类也列在这里，店员会把「周卡(前18名) ¥188」当成套餐点下去，
-  // 结果是按 ¥188 开了一个普通不限时台，权益没被核销，账也记错了。
-  // 「换套餐」处同样排除卡类，这里保持一致。
+  // 关键原则：同一个产品不管从哪个入口买，得到的权益必须完全一致。
+  // 后端两条路径都调 services/cards.ts 的 grantCard，所以
+  // 「在开台页买周卡」和「在会员详情页办周卡」拿到的权益一模一样 ——
+  // 不会出现花了 ¥188 却只是开了个普通台、权益没到账的情况。
   const groups = [
-    { key: 'timed', title: '⏱ 限时不限板', items: products.products.filter((p) => p.category === 'timed') },
-    { key: 'board', title: '📌 限板不限时', items: products.products.filter((p) => p.category === 'board') },
-    { key: 'day', title: '☀️ 日卡（当天有效）', items: products.products.filter((p) => p.category === 'day') },
+    { key: 'timed', title: '⏱ 限时不限板', pick: 'openWithProduct', items: products.products.filter((p) => p.category === 'timed') },
+    { key: 'board', title: '📌 限板不限时', pick: 'openWithProduct', items: products.products.filter((p) => p.category === 'board') },
+    { key: 'day', title: '☀️ 日卡（当天有效）', pick: 'openWithProduct', items: products.products.filter((p) => p.category === 'day') },
+    { key: 'card', title: '🎫 卡权益（办卡并立即开台）', pick: 'openWithCardProduct', items: products.products.filter((p) => p.category === 'card') },
   ];
 
   return `
@@ -421,25 +421,35 @@ async function OpenTablePage() {
   <div class="page">
     <div id="ot-error"></div>
 
-    ${member && member.cardValid && !member.cardFrozen ? `
-    <div class="card" style="border:2px solid var(--mint)">
-      <div class="card-title">该会员持有权益</div>
-      <div style="font-size:16px;font-weight:700;color:#0B6B4F;margin-bottom:4px">
-        🎫 ${cardTypeName(member.cardType)} · ${fmtDate(member.cardStartedAt)} — ${fmtDate(member.cardExpiresAt)}
-      </div>
-      <div style="font-size:12.5px;color:var(--text-mid);margin-bottom:12px">
-        卡权益为全天不限时，用卡开台不选套餐、不计超时、不收费（加购另计）
-      </div>
-      <button class="btn mint" onclick="openWithCard(${tableId},${memberId})">用卡开台</button>
-    </div>` : member ? `
-    <div class="card" style="border:1.5px dashed var(--pink);background:var(--pink-pale)">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-        <div style="font-size:13px;color:var(--text-mid);line-height:1.5">
-          该会员暂无卡权益${member.cardFrozen ? '（权益已冻结）' : ''}<br>
-          <span style="font-size:12px">周卡需先办理，办完回这里点「用卡开台」核销</span>
+    ${member && member.cardType && member.cardValid && !member.cardFrozen ? (
+      member.cardActivated ? `
+      <div class="card" style="border:2px solid var(--mint)">
+        <div class="card-title">该会员持有权益</div>
+        <div style="font-size:16px;font-weight:700;color:#0B6B4F;margin-bottom:4px">
+          🎫 ${cardTypeName(member.cardType)} · ${fmtDate(member.cardStartedAt)} — ${fmtDate(member.cardExpiresAt)}
         </div>
-        <button class="btn secondary" style="flex:0 0 auto;padding:7px 14px"
-                onclick="go('memberDetail',{id:${memberId}})">去办卡</button>
+        <div style="font-size:12.5px;color:var(--text-mid);margin-bottom:12px">
+          卡权益为全天不限时，用卡开台不选套餐、不计超时、不收费（加购另计）
+        </div>
+        <button class="btn mint" onclick="openWithCard(${tableId},${memberId})">用卡开台</button>
+      </div>` : `
+      <div class="card" style="border:2px solid var(--yellow);background:#FFFDF5">
+        <div class="card-title">该会员有未激活的权益</div>
+        <div style="font-size:16px;font-weight:700;color:#8a6d00;margin-bottom:4px">
+          🎫 ${cardTypeName(member.cardType)} · 待生效 ${member.cardPendingDays} 天
+        </div>
+        <div style="font-size:12.5px;color:var(--text-mid);margin-bottom:12px">
+          还没使用过。现在开台就开始计时，${member.cardPendingDays} 天从今天算起。
+        </div>
+        <button class="btn mint" onclick="openWithCard(${tableId},${memberId})">用卡开台（开始计时）</button>
+      </div>`)
+    : member ? `
+    <div class="card" style="border:1.5px dashed var(--pink);background:var(--pink-pale)">
+      <div style="font-size:13px;color:var(--text-mid);line-height:1.5">
+        ${member.cardType
+          ? (member.cardFrozen ? '该会员的权益已冻结' : '该会员的卡已过期')
+          : '该会员暂无卡权益'}<br>
+        <span style="font-size:12px">可以在下面的「卡权益」里直接办卡并开台，一次搞定</span>
       </div>
     </div>` : ''}
 
@@ -449,7 +459,7 @@ async function OpenTablePage() {
         <div class="card-title" style="margin-top:12px">${g.title}</div>
         <div class="product-grid">
           ${g.items.map((p) => `
-            <div class="product-card" onclick="openWithProduct(${p.id})">
+            <div class="product-card" onclick="${g.pick}(${p.id})">
               <div class="pname">${esc(p.name)}</div>
               <div class="pprice">¥${yuan(p.priceCents)}</div>
               <div class="ptag">${p.durationMinutes ? humanMinutes(p.durationMinutes) : (p.pins ? p.pins + ' 钉' : p.cardValidDays ? p.cardValidDays + ' 天' : '')}</div>
@@ -684,7 +694,90 @@ async function openWithCard(tableId, memberId) {
     const r = await api.post('/api/v1/sessions', {
       tableId, memberId, useCard: true, productId: null,
     });
-    toast(`${r.tableName} 用卡开台成功 · 权益至 ${fmtDate(r.cardExpiresAt)}`);
+    const when = r.boughtCard
+      ? `已办卡 ¥${yuan(r.boughtCard.priceCents)} · `
+      : '';
+    toast(`${r.tableName} 用卡开台 · ${when}权益 ${fmtDate(r.cardStartedAt)} 至 ${fmtDate(r.cardExpiresAt)}`);
+    go('seatDetail', { sessionId: r.sessionId });
+  } catch (e) {
+    if (errBox) errBox.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+    window.scrollTo(0, 0);
+  }
+}
+
+/**
+ * 开台页点卡权益：办卡 + 立即用这张卡开台（一条龙）。
+ *
+ * 为什么要单独一个入口：
+ *   顾客进店说"办张周卡然后玩"，店员不该被要求先跑到会员页办卡再回来开台。
+ *   但"方便"不能以牺牲正确性为代价 —— 所以这里走后端的 grantCard，
+ *   和会员详情页「办卡」是同一份实现，
+ *   保证同一个产品不管从哪个入口买，拿到的权益完全一致。
+ */
+async function openWithCardProduct(productId) {
+  const errBox = $('#ot-error');
+  const target = state.openTarget;
+  if (!target) {
+    if (errBox) errBox.innerHTML = `<div class="alert error">页面状态已失效，请返回重新选择桌位</div>`;
+    return;
+  }
+  if (!target.memberId) {
+    if (errBox) {
+      errBox.innerHTML = `<div class="alert error">
+        卡权益只能办给会员。<br>
+        <span style="font-size:12.5px">请返回上一步选择会员，或先新建一个会员。</span>
+      </div>`;
+    }
+    window.scrollTo(0, 0);
+    return;
+  }
+
+  const products = await api.get('/api/v1/products');
+  const prod = products.products.find((p) => p.id === productId);
+  if (!prod) {
+    if (errBox) {
+      errBox.innerHTML = `<div class="alert error">这个卡种刚刚下架或已停用，请重新选择。</div>`;
+    }
+    render();
+    window.scrollTo(0, 0);
+    return;
+  }
+
+  const days = prod.cardValidDays ?? 7;
+  state.confirmDialog = {
+    title: '办卡并开台',
+    lines: [
+      target.guestName ? `散客：${target.guestName}` : '会员（已选择）',
+      `卡种：${prod.name}　¥${yuan(prod.priceCents)}`,
+      `有效期：${days} 天`,
+    ],
+    note: `先收 ¥${yuan(prod.priceCents)} 办卡，随即用这张卡开台。` +
+          `天数从这次开台（首次使用）开始算，全程不限时、不计超时；加购另计。`,
+    confirmText: '确认办卡并开台',
+    confirmFn: 'reallyOpenWithCardProduct',
+    args: [productId],
+  };
+  render();
+}
+
+/** 已确认：办卡 + 开台（后端同一事务，不会出现"钱收了台没开"） */
+async function reallyOpenWithCardProduct(productId) {
+  const errBox = $('#ot-error');
+  const target = state.openTarget;
+  if (!target) return;
+
+  try {
+    const r = await api.post('/api/v1/sessions', {
+      tableId: target.tableId,
+      memberId: target.memberId,
+      productId: null,
+      useCard: true,
+      cardProductId: productId,
+      cardPaymentMethod: state.lastPayMethod || 'cash',
+    });
+    state.openTarget = null;
+    const cardMsg = r.boughtCard ? `已办卡 ¥${yuan(r.boughtCard.priceCents)} · ` : '';
+    toast(`${r.tableName} ${cardMsg}权益 ${fmtDate(r.cardStartedAt)} 至 ${fmtDate(r.cardExpiresAt)}`);
     go('seatDetail', { sessionId: r.sessionId });
   } catch (e) {
     if (errBox) errBox.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
@@ -821,6 +914,21 @@ async function SeatDetailPage() {
         <input id="settleNote" placeholder="选填">
       </div>
       <button class="btn" id="settleBtn" onclick="doSettle(${sessionId})">确认结账</button>
+    </div>
+
+    <div class="card danger-zone">
+      <h2>取消开台</h2>
+      <div class="hint" style="font-size:12.5px;color:var(--text-mid);margin-bottom:10px">
+        用于顾客开台后离开、套餐选错、临时不玩了等情况。
+        取消后这个台作废并释放，<b>不产生任何金额</b>。
+        已经结过账的台不适用，请到「收入 → 订单」用整单作废。
+      </div>
+      <div class="field">
+        <label>取消原因 <span style="color:var(--pink)">*</span></label>
+        <input id="cancelReason" placeholder="例如：顾客临时有事离开" maxlength="200">
+      </div>
+      <button class="btn danger block" id="cancelBtn"
+              onclick="doCancelSession(${sessionId})">取消开台</button>
     </div>
   </div>`;
 }
@@ -1222,10 +1330,19 @@ async function MembersPage() {
 function memberCard(m) {
   const hasCard = Boolean(m.cardType);
 
-  // 权益行：有效 → 显示起止区间；过期 → 标记已过期；无卡 → 明示无权益
+  // 权益行分四种情况：
+  //   无卡      → 明示无权益
+  //   未激活    → 办了卡还没第一次用，显示待生效天数（不显示起止日期）
+  //   生效中    → 显示本期起止 + 剩余
+  //   已过期    → 标记过期
   let benefitHtml;
   if (!hasCard) {
     benefitHtml = `<div class="mc-benefit none">🎫 无权益</div>`;
+  } else if (!m.cardActivated) {
+    benefitHtml = `<div class="mc-benefit pending">
+      🎫 ${cardTypeName(m.cardType)} · 未激活
+      <span class="mc-left">首次用卡起算 ${m.cardPendingDays} 天</span>
+    </div>`;
   } else if (m.cardValid) {
     benefitHtml = `<div class="mc-benefit valid">
       🎫 ${cardTypeName(m.cardType)} · ${fmtDate(m.cardStartedAt)} — ${fmtDate(m.cardExpiresAt)}
@@ -1348,11 +1465,15 @@ async function MemberDetailPage() {
       ${m.cardType
         ? (m.cardFrozen
             ? `<div class="card-badge frozen">❄️ ${cardTypeName(m.cardType)} 已冻结</div>`
-            : `<div class="card-badge ${m.cardValid ? '' : 'expired'}">
-                 🎫 ${cardTypeName(m.cardType)} ${m.cardValid
-                   ? `${fmtDate(m.cardStartedAt)} — ${fmtDate(m.cardExpiresAt)}`
-                   : '已过期 · ' + fmtDate(m.cardExpiresAt)}
-               </div>`)
+            : !m.cardActivated
+              ? `<div class="card-badge pending">
+                   🎫 ${cardTypeName(m.cardType)} · 未激活（待生效 ${m.cardPendingDays} 天）
+                 </div>`
+              : `<div class="card-badge ${m.cardValid ? '' : 'expired'}">
+                   🎫 ${cardTypeName(m.cardType)} ${m.cardValid
+                     ? `${fmtDate(m.cardStartedAt)} — ${fmtDate(m.cardExpiresAt)}`
+                     : '已过期 · ' + fmtDate(m.cardExpiresAt)}
+                 </div>`)
         : `<div class="card-badge expired">🎫 无权益</div>`}
       <div class="figures">
         <div class="fig"><div class="k">到店次数</div><div class="v">${m.visitCount}</div></div>
@@ -1590,9 +1711,13 @@ function cardDialogHtml() {
     <div class="cd-price">¥${yuan(dlg.product.priceCents)}</div>
     <div class="cd-info">
       会员：<b>${esc(m.displayName)}</b><br>
-      ${renewing
-        ? `现有${cardTypeName(m.cardType)}至 ${fmtDate(m.cardExpiresAt)}，续卡后从该日顺延 ${dlg.product.cardValidDays} 天`
-        : `新卡有效期 ${dlg.product.cardValidDays} 天，从今天起算`}
+      ${!m.cardType
+        ? `新卡 <b>未激活</b>：${dlg.product.cardValidDays} 天从<b>首次用卡开台</b>那天才开始算，办完不来也不会白流。`
+        : !m.cardActivated
+          ? `现有未激活的${cardTypeName(m.cardType)}（待生效 ${m.cardPendingDays} 天），再办一张将<b>累加</b>为 ${m.cardPendingDays + dlg.product.cardValidDays} 天，仍从首次用卡开台起算。`
+          : m.cardValid
+            ? `现有${cardTypeName(m.cardType)} ${fmtDate(m.cardStartedAt)} 至 ${fmtDate(m.cardExpiresAt)}。续卡后新一期紧接其后，<b>${fmtDate(m.cardExpiresAt)} 次日</b>起 ${dlg.product.cardValidDays} 天。`
+            : `现卡已过期（${fmtDate(m.cardExpiresAt)}）。续卡将从<b>今天</b>重新起算 ${dlg.product.cardValidDays} 天。`}
     </div>
     <div class="cd-label">收款方式</div>
     <div class="cd-pay">
@@ -2083,6 +2208,49 @@ async function doVoidOrder(id) {
     btn.disabled = false;
     btn.dataset.confirmed = '';
     btn.textContent = '整单作废';
+  }
+}
+
+/**
+ * 取消开台：把进行中的会话作废并释放桌位。
+ *
+ * 与 doVoidOrder 的区别：那个作废的是已结账订单（会写反向流水冲账），
+ * 这个取消的是还没结账的开台，不涉及任何金额。
+ * 同样用按钮两段式确认（不用 confirm()，见 doVoidOrder 的说明），原因必填。
+ */
+async function doCancelSession(sessionId) {
+  const errBox = $('#sd-error');
+  const reasonEl = $('#cancelReason');
+  const reason = reasonEl ? reasonEl.value.trim() : '';
+  if (!reason) {
+    errBox.innerHTML = `<div class="alert error">请填写取消原因</div>`;
+    return;
+  }
+
+  const btn = $('#cancelBtn');
+  if (!btn) return;
+
+  // 第一次点击：变成确认态，避免误触
+  if (btn.dataset.confirmed !== '1') {
+    btn.dataset.confirmed = '1';
+    btn.textContent = '再点一次确认取消';
+    errBox.innerHTML = `<div class="alert warn">
+      取消后这个台会作废并释放，不产生任何金额，操作会记入日志。确认请再点一次。
+    </div>`;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '处理中…';
+  try {
+    await api.post(`/api/v1/sessions/${sessionId}/cancel`, { reason });
+    toast('已取消开台');
+    go('board');
+  } catch (e) {
+    errBox.innerHTML = `<div class="alert error">${esc(e.message)}</div>`;
+    btn.disabled = false;
+    btn.dataset.confirmed = '';
+    btn.textContent = '取消开台';
   }
 }
 
@@ -3011,10 +3179,11 @@ Object.assign(window, {
   changeAddonQty, changeProduct, doSettle, refreshPreview,
   debouncedSearchMembers, searchMembers, debouncedMemberSearch,
   doCreateMember, doUpdateMember, buyCard, renewCard, confirmBuyCard, closeCardDialog,
-  doVoidOrder, doChangePassword,
+  doVoidOrder, doCancelSession, doChangePassword,
   savePricing, toggleTable, addTable,
   switchMemberTab, switchRevenueTab,
-  closeConfirmDialog, runConfirmAction, reallyOpenWithProduct, reallyChangeProduct, reallyToggleTable, reallyDoSettle,
+  closeConfirmDialog, runConfirmAction, reallyOpenWithProduct, reallyOpenWithCardProduct,
+  openWithCardProduct, reallyChangeProduct, reallyToggleTable, reallyDoSettle,
   pauseTiming, resumeTiming,
   previewOvertime, saveOvertime, editProduct, closeProductDialog, saveProduct,
   newProduct, onCategoryChange, deleteProduct, reallyDeleteProduct, toggleProdFlag,

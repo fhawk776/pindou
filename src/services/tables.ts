@@ -14,6 +14,10 @@ import type pg from 'pg';
 import { withTransaction } from '../lib/db.js';
 import { applyBp, type Cents } from '../lib/money.js';
 import { writeAudit } from './audit.js';
+import {
+  toDateString, shopToday, cardExpiryFrom, isCardExpired,
+} from '../lib/dates.js';
+import { grantCard, activateCard, type GrantCardResult } from './cards.js';
 
 export class TableError extends Error {
   constructor(message: string) {
@@ -91,37 +95,12 @@ export function isDiscountDay(date: Date, cfg: PricingConfig, timeZone = 'Asia/S
 }
 
 /**
- * 把 PostgreSQL DATE 值规范化为 "YYYY-MM-DD" 字符串。
- *
- * 注意：pg 驱动会把 DATE 列读成 JS Date 对象（本地时区零点），
- * 而不是字符串。直接 String(date).slice(0,10) 会得到 "Sat Oct 10" 这种
- * 无效结果，因此必须显式格式化。
+ * 日期工具集中在 lib/dates.ts，办卡与开台共用同一套口径。
+ * 这里 re-export，保持既有 `from './tables.js'` 的引用不受影响。
  */
-export function toDateString(value: unknown, timeZone = 'Asia/Shanghai'): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string') return value.slice(0, 10);
-  if (value instanceof Date) {
-    // 用本地日期字段而非 toISOString()，避免时区偏移导致日期前移一天
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(value);
-  }
-  return null;
-}
-
-/**
- * 判断会员卡是否已过期。
- * card_expires_at 的语义是"该日结束前有效"，因此当天不算过期。
- */
-export function isCardExpired(cardExpiresAt: unknown, timeZone = 'Asia/Shanghai'): boolean {
-  const expires = toDateString(cardExpiresAt, timeZone);
-  if (!expires) return true;
-  const today = new Intl.DateTimeFormat('en-CA', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date());
-  // 同为 YYYY-MM-DD 格式，字符串比较即日期先后比较
-  return expires < today;
-}
+export {
+  toDateString, shopToday, addDaysStr, cardExpiryFrom, isCardExpired,
+} from '../lib/dates.js';
 
 /**
  * 计算已进行的分钟数。
@@ -303,6 +282,17 @@ export interface OpenTableInput {
   operatorId: number;
   /** 是否用会员卡核销（周卡/月卡/日卡） */
   useCard?: boolean;
+  /**
+   * 同时办一张卡（产品 ID），办完立刻用这张卡开台。
+   *
+   * 这是「开台页选周卡」的入口：顾客当场办卡并开台，一个动作完成。
+   * 关键：办卡走的是与会员详情页「办卡」**完全相同**的 grantCard 实现，
+   * 因此同一个产品不管从哪个入口买，得到的权益都一致 ——
+   * 不会出现"在开台页买的周卡变成普通套餐、顾客花了钱却没有权益"。
+   */
+  cardProductId?: number | null;
+  /** 同时办卡时的收款方式，默认现金 */
+  cardPaymentMethod?: 'cash' | 'wechat' | 'alipay' | 'other';
   note?: string;
 }
 
@@ -313,7 +303,10 @@ export async function openTable(input: OpenTableInput): Promise<{
   startedAt: Date;
   expectedEndAt: Date | null;
   useCard: boolean;
+  cardStartedAt: string | null;
   cardExpiresAt: string | null;
+  /** 本次同时办卡的结果（订单号、实收等），未办卡为 null */
+  boughtCard: GrantCardResult | null;
 }> {
   const { tableId, memberId, productId, operatorId } = input;
 
@@ -336,10 +329,18 @@ export async function openTable(input: OpenTableInput): Promise<{
     if (busy.length > 0) throw new TableError(`${table.name} 正在使用中`);
 
     // 会员校验
-    let memberRow: { id: number; card_type: string | null; card_expires_at: string | null } | null = null;
+    let memberRow: {
+      id: number;
+      card_type: string | null;
+      card_started_at: string | null;
+      card_expires_at: string | null;
+      card_pending_days: number;
+    } | null = null;
     if (memberId !== null) {
       const { rows } = await client.query(
-        `SELECT id, card_type, card_expires_at, status FROM members WHERE id = $1 FOR UPDATE`,
+        `SELECT id, card_type, card_started_at, card_expires_at,
+                card_pending_days, status
+           FROM members WHERE id = $1 FOR UPDATE`,
         [memberId]
       );
       if (rows.length === 0) throw new TableError('会员不存在');
@@ -364,27 +365,47 @@ export async function openTable(input: OpenTableInput): Promise<{
       if (guest.length > 20) throw new TableError('称呼不能超过 20 个字');
     }
 
-    // 用卡核销：必须持有有效卡、未被冻结、且未过期
-    const useCard = Boolean(input.useCard);
+    // ---- 同时办卡：先授予权益，随后立刻用这张卡开台 ----
+    //
+    // 这是「开台页选周卡」的路径。关键是办卡走 grantCard ——
+    // 与会员详情页「办卡」同一份实现，所以两个入口买同一个产品，
+    // 得到的权益完全一致（不会变成"花 ¥188 买了个普通套餐"）。
+    //
+    // 与开台同事务：要么都成功、要么都回滚，
+    // 不会出现「钱收了、台没开」或「台开了、权益没给」。
+    let boughtCard: GrantCardResult | null = null;
+    if (input.cardProductId != null) {
+      if (memberId === null) throw new TableError('散客无法办卡，请先建立会员');
+      boughtCard = await grantCard(client, {
+        memberId,
+        productId: input.cardProductId,
+        paymentMethod: input.cardPaymentMethod ?? 'cash',
+        operatorId,
+      });
+    }
+
+    // ---- 用卡核销 ----
+    // 刚办完卡的会员此时是「未激活」状态，下面这一步就是这张卡的第一次使用。
+    const useCard = Boolean(input.useCard) || boughtCard !== null;
+    let cardStartedAt: string | null = null;
     let cardExpiresAt: string | null = null;
     if (useCard) {
       if (memberId === null) throw new TableError('散客无法使用卡权益');
-      if (!memberRow?.card_type) throw new TableError('该会员没有有效的卡');
 
-      // 冻结检查：单独查一次，因为 lockMember 不返回冻结字段
       const { rows: frows } = await client.query(
-        'SELECT card_frozen, card_frozen_reason FROM members WHERE id = $1',
+        'SELECT card_type, card_frozen, card_frozen_reason FROM members WHERE id = $1',
         [memberId]
       );
-      if (frows[0]?.card_frozen) {
+      if (!frows[0]?.card_type) throw new TableError('该会员没有有效的卡');
+      if (frows[0].card_frozen) {
         const why = frows[0].card_frozen_reason ? `（${frows[0].card_frozen_reason}）` : '';
         throw new TableError(`该卡已被冻结${why}，无法核销`);
       }
 
-      if (isCardExpired(memberRow.card_expires_at)) {
-        throw new TableError('该会员的卡已过期');
-      }
-      cardExpiresAt = toDateString(memberRow.card_expires_at);
+      // 未激活 → 此刻激活并写入本期起止；已激活 → 校验是否过期
+      const act = await activateCard(client, memberId);
+      cardStartedAt = act.startedAt;
+      cardExpiresAt = act.expiresAt;
     }
 
     // 套餐：用卡核销时不需要套餐（卡是全天不限时的通行权益）
@@ -421,13 +442,13 @@ export async function openTable(input: OpenTableInput): Promise<{
     const { rows: srows } = await client.query(
       `INSERT INTO table_sessions
          (table_id, member_id, guest_name, product_id, product_name, product_price_cents,
-          used_card, card_expires_at, started_at, expected_end_at, opened_by, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          used_card, card_started_at, card_expires_at, started_at, expected_end_at, opened_by, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING id, started_at, expected_end_at`,
       [
         tableId, memberId, input.guestName?.trim() || null,
         product?.id ?? null, product?.name ?? null, product?.price_cents ?? null,
-        useCard, cardExpiresAt, startedAt, expectedEndAt, operatorId, input.note ?? '',
+        useCard, cardStartedAt, cardExpiresAt, startedAt, expectedEndAt, operatorId, input.note ?? '',
       ]
     );
 
@@ -443,7 +464,12 @@ export async function openTable(input: OpenTableInput): Promise<{
       );
     }
 
-    const sessionLabel = useCard ? `${cardTypeName(memberRow!.card_type!)}核销` : product!.name!;
+    // 会话名：刚办卡的用卡名（此时 memberRow.card_type 还是办卡前的旧值），
+    // 已持有权益的用卡种名。
+    const cardLabel = boughtCard
+      ? boughtCard.productName
+      : (memberRow?.card_type ? cardTypeName(memberRow.card_type) : '权益');
+    const sessionLabel = useCard ? `${cardLabel}核销` : product!.name!;
 
     await writeAudit(client, {
       actorId: operatorId,
@@ -452,9 +478,14 @@ export async function openTable(input: OpenTableInput): Promise<{
       targetId: Number(srows[0].id),
       after: {
         table: table.name, product: product?.name ?? null,
-        memberId, guestName: input.guestName, useCard, cardExpiresAt,
+        memberId, guestName: input.guestName, useCard, cardStartedAt, cardExpiresAt,
+        boughtCard: boughtCard
+          ? { orderNo: boughtCard.orderNo, productName: boughtCard.productName, priceCents: boughtCard.priceCents }
+          : null,
       },
-      summary: `开台 ${table.name} · ${sessionLabel}${useCard ? `（权益至 ${cardExpiresAt}）` : ''}`,
+      summary: `开台 ${table.name} · ${sessionLabel}`
+        + (boughtCard ? ` · 同时办卡 ${boughtCard.productName} ¥${(boughtCard.priceCents / 100).toFixed(2)}` : '')
+        + (useCard ? `（权益 ${cardStartedAt} 至 ${cardExpiresAt}）` : ''),
     });
 
     return {
@@ -464,7 +495,9 @@ export async function openTable(input: OpenTableInput): Promise<{
       startedAt: srows[0].started_at as Date,
       expectedEndAt: srows[0].expected_end_at as Date | null,
       useCard,
+      cardStartedAt,
       cardExpiresAt,
+      boughtCard,
     };
   });
 }
@@ -607,6 +640,72 @@ export async function resumeSession(sessionId: number, operatorId: number): Prom
       startedAt: rows[0].started_at,
       expectedEndAt: rows[0].expected_end_at ? rows[0].expected_end_at : null,
     };
+  });
+}
+
+/**
+ * 取消开台：把进行中的会话作废并释放桌位。
+ *
+ * 【与「整单作废」的区别】
+ *   本函数处理「还没结账」的开台 —— 顾客开台后马上走了、套餐选错了想撤销、
+ *   顾客临时不玩了等。不涉及任何金额，只是把会话标记为 voided。
+ *   voidOrder 处理的是「已经结账」的订单，会写反向流水冲账。
+ *
+ *   如果这里发现该开台已经结过账，直接拒绝并提示改用「整单作废」，
+ *   避免绕过流水冲账逻辑造成账目不平。
+ */
+export async function cancelSession(
+  sessionId: number,
+  operatorId: number,
+  reason: string
+): Promise<{ ok: true; sessionId: number }> {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `SELECT id, table_id, status, product_name, product_price_cents, used_card, started_at
+         FROM table_sessions WHERE id = $1 FOR UPDATE`,
+      [sessionId]
+    );
+    if (rows.length === 0) throw new TableError('开台记录不存在');
+
+    const s = rows[0];
+    if (s.status !== 'active') {
+      throw new TableError(
+        s.status === 'settled' ? '这个台已经结账了，请改用「整单作废」' : '这个台已经取消过了'
+      );
+    }
+
+    // 双保险：即使 status 还是 active，只要已生成有效订单，也必须走订单作废流程
+    const { rows: ord } = await client.query(
+      `SELECT id FROM orders WHERE table_session_id = $1 AND status <> 'voided' LIMIT 1`,
+      [sessionId]
+    );
+    if (ord.length > 0) throw new TableError('这个台已经结账了，请改用「整单作废」');
+
+    await client.query(
+      `UPDATE table_sessions
+          SET status = 'voided', ended_at = now(), paused_at = NULL
+        WHERE id = $1`,
+      [sessionId]
+    );
+    await client.query(`UPDATE tables SET status = 'idle' WHERE id = $1`, [s.table_id]);
+
+    await writeAudit(client, {
+      actorId: operatorId,
+      action: 'table.cancel',
+      targetType: 'table_session',
+      targetId: sessionId,
+      before: {
+        status: s.status,
+        productName: s.product_name,
+        productPriceCents: Number(s.product_price_cents),
+        usedCard: s.used_card,
+        startedAt: s.started_at,
+      },
+      after: { status: 'voided' },
+      summary: `取消开台：${reason}`,
+    });
+
+    return { ok: true as const, sessionId };
   });
 }
 

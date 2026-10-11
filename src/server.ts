@@ -104,6 +104,7 @@ export async function buildServer() {
     const BUSINESS_ERRORS = new Set([
       'MemberError', 'TableError', 'LedgerError', 'AuthError',
       'MoneyError', 'BalanceError', 'PointsError', 'OrderError',
+      'CardError',
     ]);
     const isBusinessError = err.name !== undefined && BUSINESS_ERRORS.has(err.name);
 
