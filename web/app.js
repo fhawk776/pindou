@@ -401,11 +401,19 @@ async function OpenTablePage() {
 
   const who = member ? member.displayName : guestName;
 
+  // 卡类（周卡/月卡）刻意不列在"选套餐"里。
+  //
+  // 卡是「权益」而非坐桌套餐：必须先在会员详情页「办卡」购买，
+  // 再用上方绿色按钮「用卡开台」核销，这样开出来的会话才是 used_card=true
+  // （全天不限时、不计超时、不收费）。
+  //
+  // 早前把卡类也列在这里，店员会把「周卡(前18名) ¥188」当成套餐点下去，
+  // 结果是按 ¥188 开了一个普通不限时台，权益没被核销，账也记错了。
+  // 「换套餐」处同样排除卡类，这里保持一致。
   const groups = [
     { key: 'timed', title: '⏱ 限时不限板', items: products.products.filter((p) => p.category === 'timed') },
     { key: 'board', title: '📌 限板不限时', items: products.products.filter((p) => p.category === 'board') },
     { key: 'day', title: '☀️ 日卡（当天有效）', items: products.products.filter((p) => p.category === 'day') },
-    { key: 'card', title: '🎫 周卡', items: products.products.filter((p) => p.category === 'card') },
   ];
 
   return `
@@ -423,6 +431,16 @@ async function OpenTablePage() {
         卡权益为全天不限时，用卡开台不选套餐、不计超时、不收费（加购另计）
       </div>
       <button class="btn mint" onclick="openWithCard(${tableId},${memberId})">用卡开台</button>
+    </div>` : member ? `
+    <div class="card" style="border:1.5px dashed var(--pink);background:var(--pink-pale)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div style="font-size:13px;color:var(--text-mid);line-height:1.5">
+          该会员暂无卡权益${member.cardFrozen ? '（权益已冻结）' : ''}<br>
+          <span style="font-size:12px">周卡需先办理，办完回这里点「用卡开台」核销</span>
+        </div>
+        <button class="btn secondary" style="flex:0 0 auto;padding:7px 14px"
+                onclick="go('memberDetail',{id:${memberId}})">去办卡</button>
+      </div>
     </div>` : ''}
 
     <div class="card">
