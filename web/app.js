@@ -100,10 +100,36 @@ function go(name, params = {}) {
   render();
 }
 
+/**
+ * 轻提示。
+ *
+ * 【不要走 render()】
+ *   早前实现是：
+ *     state.toast = {...}; render();
+ *     setTimeout(() => { state.toast = null; render(); }, 2600);
+ *   于是每弹一次提示，整页会被重建两次 —— 页面闪两下、
+ *   loadingView 一闪、滚动位置丢失、API 重新请求。
+ *   toast 只是个浮层，单独用一个节点挂到 body 上即可，
+ *   完全不需要碰页面内容。
+ */
+let toastTimer = null;
 function toast(msg, type = 'success') {
-  state.toast = { msg, type };
-  render();
-  setTimeout(() => { state.toast = null; render(); }, 2600);
+  const bg = { success: '#6FD9C0', error: '#FF8A65', warn: '#FFD93D' }[type] || '#6FD9C0';
+  const color = type === 'warn' ? '#6B4E00' : '#fff';
+
+  let layer = document.getElementById('toast-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = 'toast-layer';
+    document.body.appendChild(layer);
+  }
+  layer.innerHTML = `<div style="position:fixed;bottom:calc(88px + env(safe-area-inset-bottom,0px));left:50%;
+    transform:translateX(-50%);background:${bg};color:${color};padding:11px 22px;border-radius:22px;
+    font-size:14px;font-weight:600;z-index:100;box-shadow:0 5px 18px rgba(0,0,0,.16);
+    max-width:88vw;text-align:center;transition:opacity .2s">${esc(msg)}</div>`;
+
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { layer.innerHTML = ''; }, 2600);
 }
 
 // ---------------------------------------------------------------------------
@@ -3231,10 +3257,10 @@ async function render() {
       app.innerHTML = loadingView();
       const html = await result;
       if (token !== renderToken) return;
-      app.innerHTML = html + cardDialogHtml() + refundDialogHtml() + freezeDialogHtml() + confirmDialogHtml() + productDialogHtml() + settleDialogHtml() + toastHtml();
+      app.innerHTML = html + cardDialogHtml() + refundDialogHtml() + freezeDialogHtml() + confirmDialogHtml() + productDialogHtml() + settleDialogHtml();
       afterRender(routeName);
     } else {
-      app.innerHTML = result + cardDialogHtml() + refundDialogHtml() + freezeDialogHtml() + confirmDialogHtml() + productDialogHtml() + settleDialogHtml() + toastHtml();
+      app.innerHTML = result + cardDialogHtml() + refundDialogHtml() + freezeDialogHtml() + confirmDialogHtml() + productDialogHtml() + settleDialogHtml();
       afterRender(routeName);
     }
   } catch (e) {
@@ -3248,16 +3274,6 @@ async function render() {
     app.innerHTML = `<div class="page"><div class="alert error">${esc(e.message)}</div>
       <button class="btn secondary" onclick="go('board')">返回看板</button></div>`;
   }
-}
-
-function toastHtml() {
-  if (!state.toast) return '';
-  const bg = { success: '#6FD9C0', error: '#FF8A65', warn: '#FFD93D' }[state.toast.type] || '#6FD9C0';
-  const color = state.toast.type === 'warn' ? '#6B4E00' : '#fff';
-  return `<div style="position:fixed;bottom:calc(88px + env(safe-area-inset-bottom,0px));left:50%;
-    transform:translateX(-50%);background:${bg};color:${color};padding:11px 22px;border-radius:22px;
-    font-size:14px;font-weight:600;z-index:100;box-shadow:0 5px 18px rgba(0,0,0,.16);
-    max-width:88vw;text-align:center">${esc(state.toast.msg)}</div>`;
 }
 
 /**
