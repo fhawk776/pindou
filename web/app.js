@@ -420,7 +420,13 @@ async function OpenTablePage() {
     : [];
 
   // 把本次开台的对象存进状态，避免把用户输入的称呼拼进 onclick（会破坏 JS 语法）
-  state.openTarget = { tableId, memberId, guestName, extraTableIds: keepExtras, idleTables };
+  // primaryName 用于确认弹窗里显示"占用桌位"，重新渲染时也要一并保留。
+  state.openTarget = {
+    tableId, memberId, guestName,
+    extraTableIds: keepExtras,
+    idleTables,
+    primaryName: table.name,
+  };
 
   const who = member ? member.displayName : guestName;
 
@@ -590,6 +596,19 @@ function pickGuest(tableId) {
  * 一套计时、一张结账单、一次超时费。这里只负责"占哪几张桌子"。
  * ------------------------------------------------------------------------- */
 
+/** 本次开台将占用的桌位名列表（主台 + 已加的附加台），用于确认弹窗与提示 */
+function currentTableNames() {
+  const t = state.openTarget;
+  if (!t) return [];
+  const names = [];
+  if (t.primaryName) names.push(t.primaryName);
+  for (const id of (t.extraTableIds ?? [])) {
+    const hit = (t.idleTables ?? []).find((x) => x.tableId === id);
+    names.push(hit ? hit.tableName : `台${id}`);
+  }
+  return names;
+}
+
 /** 渲染桌位选择条：主台 + 已加的附加台 + 添加入口 */
 function tablePickerInner(idleTables, primaryName) {
   const extra = state.openTarget?.extraTableIds ?? [];
@@ -674,19 +693,21 @@ async function openWithProduct(productId) {
 
   const who = target.guestName ? `散客：${target.guestName}` : '会员（已选择）';
 
-  // 套餐人数决定最多占几个台：单人套餐 1 个、双人套餐 2 个。
-  // 店员可能先加了台再选套餐，这里自动收起到合规数量并提示，
-  // 避免出现「界面显示两个台、开台只开一个」这种前后不一致。
+  // 套餐人数决定最多占几个台：单人 1 个、双人 ≤2 个。
+  // 超了就明确报错并停在原地，让店员自己决定去掉哪一张台 ——
+  // 这里不替他静默改动选台，否则他以为开了两张、其实只开了一张。
   const maxTables = prod.peopleCount ?? 1;
-  const extras = state.openTarget.extraTableIds ?? [];
-  if (1 + extras.length > maxTables) {
-    state.openTarget.extraTableIds = extras.slice(0, Math.max(0, maxTables - 1));
-    toast(
-      maxTables === 1
-        ? `「${prod.name}」是单人套餐，已收起多余的台`
-        : `「${prod.name}」最多占 ${maxTables} 个台，已收起多余的`,
-      'warn'
-    );
+  const chosen = currentTableNames();
+  if (chosen.length > maxTables) {
+    if (errBox) {
+      errBox.innerHTML = `<div class="alert error">
+        「${esc(prod.name)}」是 ${maxTables} 人套餐，最多占 ${maxTables} 个台。<br>
+        你已选了 ${chosen.length} 个台：<b>${chosen.map(esc).join('、')}</b><br>
+        <span style="font-size:12.5px">请点上方桌位旁边的「×」移除多余的，或改选人数更多的套餐。</span>
+      </div>`;
+    }
+    window.scrollTo(0, 0);
+    return;
   }
 
   // 说明文字必须按套餐类型区分：
@@ -707,6 +728,11 @@ async function openWithProduct(productId) {
     title: '确认开台',
     lines: [
       who,
+      // 占哪几张台必须写清楚：双人套餐可以只占 1 张，也可以占 2 张，
+      // 店员点确认前要能一眼看出这次到底占了哪几个位子。
+      chosen.length > 1
+        ? `占用桌位：${chosen.join('、')}（共 ${chosen.length} 个台）`
+        : `桌位：${chosen[0] ?? ''}`,
       `套餐：${prod.name}　¥${yuan(prod.priceCents)}`,
       prod.durationMinutes ? `时长：${humanMinutes(prod.durationMinutes)}`
         : (prod.pins ? `钉数：${prod.pins} 钉（不限时）`
@@ -795,11 +821,18 @@ async function openWithCard(tableId, memberId) {
   const errBox = $('#ot-error');
 
   // 卡是个人权益（卡类人数都是 1），只能占 1 个台。
-  // 店员若事先加了台，这里收起来并说明，避免被后端拒绝后一头雾水。
-  const extras = state.openTarget?.extraTableIds ?? [];
-  if (extras.length > 0) {
-    state.openTarget.extraTableIds = [];
-    toast('卡权益是个人权益，只能占 1 个台，已收起多余的', 'warn');
+  // 明确报错而不是替店员收起选台。
+  const chosen = currentTableNames();
+  if (chosen.length > 1) {
+    if (errBox) {
+      errBox.innerHTML = `<div class="alert error">
+        卡权益是个人权益，只能占 1 个台。<br>
+        你已选了 ${chosen.length} 个台：<b>${chosen.map(esc).join('、')}</b><br>
+        <span style="font-size:12.5px">请点上方桌位旁边的「×」移除多余的。</span>
+      </div>`;
+    }
+    window.scrollTo(0, 0);
+    return;
   }
 
   try {
@@ -859,16 +892,25 @@ async function openWithCardProduct(productId) {
   const days = prod.cardValidDays ?? 7;
 
   // 卡是个人权益（卡类人数都是 1），只能占 1 个台。
-  const extras = state.openTarget.extraTableIds ?? [];
-  if (extras.length > 0) {
-    state.openTarget.extraTableIds = [];
-    toast('卡权益是个人权益，只能占 1 个台，已收起多余的', 'warn');
+  // 同样明确报错、不静默改动店员的选台。
+  const chosen = currentTableNames();
+  if (chosen.length > 1) {
+    if (errBox) {
+      errBox.innerHTML = `<div class="alert error">
+        卡权益是个人权益，只能占 1 个台。<br>
+        你已选了 ${chosen.length} 个台：<b>${chosen.map(esc).join('、')}</b><br>
+        <span style="font-size:12.5px">请点上方桌位旁边的「×」移除多余的。</span>
+      </div>`;
+    }
+    window.scrollTo(0, 0);
+    return;
   }
 
   state.confirmDialog = {
     title: '办卡并开台',
     lines: [
       target.guestName ? `散客：${target.guestName}` : '会员（已选择）',
+      `桌位：${chosen[0] ?? ''}`,
       `卡种：${prod.name}　¥${yuan(prod.priceCents)}`,
       `有效期：${days} 天`,
     ],
